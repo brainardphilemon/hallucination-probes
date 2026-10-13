@@ -1,0 +1,15 @@
+# Kaggle already provides a CUDA-enabled PyTorch build. Keep it instead of
+# downloading a replacement torch/torchvision/torchaudio stack.
+numpy>=1.26,<3
+scipy>=1.10,<2
+scikit-learn>=1.3,<2
+pandas>=2,<3
+tqdm>=4.60
+transformers>=4.51.3,<5
+datasets>=3.3.1,<5
+accelerate>=1,<2
+safetensors>=0.4
+huggingface-hub>=0.30,<1
+sentencepiece>=0.2,<1
+bitsandbytes>=0.45.5,<0.50
+bleurt-pytorch @ git+https://github.com/lucadiliello/bleurt-pytorch.git@279ca1bb4106bde5a89f0f82723197e23d8446cb

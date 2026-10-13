@@ -1,0 +1,2 @@
+# Local install: pip install -e ".[extract,dev]"  (or pip install -r requirements.txt)
+-e .[extract,dev]
