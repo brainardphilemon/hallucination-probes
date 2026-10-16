@@ -108,7 +108,9 @@ out["probability_correct"], out["hallucinated"]   # label 1 = correct, 0 = hallu
 
 `sala_raw_concat.py` runs (for example `nvthaai/sala-g14-logsumexp-layerpca512-4x128`) saved the MLP and
 threshold but not the PCA. `hprobes import-legacy` rebuilds the PCA from the saved features with the same
-seed, attaches the weights and checks the result against that run's `results.csv`:
+seed, attaches the weights and checks the result against that run's `results.csv`. The rebuild is approximate when
+the GPU / PyTorch version differs (G14 PCA-256 run: TriviaQA AUROC 0.848 rebuilt vs 0.852 original); it warns when
+that happens, and retraining with `hprobes train` gives an exact `model.pt`:
 
 ```bash
 hprobes import-legacy --run-dir <run folder with best_mlp.pt> --artifact-dir <features> --output model.pt

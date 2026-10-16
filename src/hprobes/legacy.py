@@ -1,9 +1,11 @@
 """Import a model trained with the old SALA fork's ``sala_raw_concat.py`` into a ``model.pt`` bundle.
 
 That script saved the MLP (``best_mlp.pt``) and the calibrated threshold (``summary.json``) but not the
-per-layer PCA. The PCA is a deterministic function of the source-train features and the seed, so it is
-rebuilt here with the same procedure, and the result is checked against the run's own ``results.csv``
-(or, failing that, its recorded target AUROC) before the bundle is trusted.
+per-layer PCA. The PCA is rebuilt here with the same procedure (same rows, seed and randomized SVD), and the
+result is checked against the run's own ``results.csv`` and recorded target AUROC. The randomized SVD is not
+bit-reproducible across GPU / PyTorch versions, so the rebuild can be approximate: on Kaggle in Oct 2026 the
+G14 log-sum-exp PCA-256 run came back at TriviaQA AUROC 0.848 vs 0.852 (mean |p diff| 0.076). A warning is
+printed when that happens; for exact inference, retrain with ``hprobes train`` (its model.pt stores the PCA).
 
     hprobes import-legacy --run-dir sala_g14_6src_logsumexp_layerpca512_4x128 \
         --artifact-dir /kaggle/input/.../sala_qwen25_g14_6src_triviaqa_v1 --output model.pt
@@ -95,6 +97,11 @@ def rebuild(run_dir: Path, artifact_dir: Path, output: Path, device: str = "cuda
     report.update(target_auroc_rebuilt=float(roc_auc_score(domain.labels, probability)),
                   target_auroc_original=float(summary["target_metrics"]["auroc"]))
     print(json.dumps(report, indent=2), flush=True)
+    if (report.get("max_abs_probability_diff", 0.0) > 1e-3
+            or abs(report["target_auroc_rebuilt"] - report["target_auroc_original"]) > 1e-3):
+        print("WARNING: the rebuilt PCA does not reproduce the original run exactly (randomized SVD differs on this "
+              "GPU / PyTorch version). Predictions are approximate; retrain with `hprobes train` for an exact model.pt.",
+              flush=True)
     return report
 
 
