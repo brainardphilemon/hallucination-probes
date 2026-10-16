@@ -16,46 +16,11 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from hprobes.extract import DEFAULT_SYSTEM_PROMPT, chat_prompt, compute_dtype, release_gpu, stack_last_token_features
+from hprobes.extract import (DEFAULT_SYSTEM_PROMPT, answer_token_ids, build_prompt, model_load_settings,
+                             release_gpu, stack_last_token_features, stop_token_ids, strip_trailing)
+
+__all__ = ["build_prompt", "generate_with", "load_model", "run", "stop_token_ids", "strip_trailing"]
 from hprobes.predict import read_records
-
-
-def build_prompt(tokenizer, question: str, system_prompt: str) -> str:
-    """Chat prompt with the system instruction; templates that reject a system role get it prepended to the user turn."""
-    try:
-        return chat_prompt(tokenizer, question, system_prompt)
-    except Exception:
-        return tokenizer.apply_chat_template([{"role": "user", "content": f"{system_prompt}\n\n{question}"}],
-                                             tokenize=False, add_generation_prompt=True)
-
-
-END_OF_TURN_TOKENS = ("<end_of_turn>", "<|im_end|>", "<|eot_id|>", "<|end|>", "<|endoftext|>", "</s>")
-
-
-def stop_token_ids(tokenizer, model) -> list[int]:
-    """Ids that end an answer: the model's configured EOS ids, the tokenizer's EOS / pad, and known end-of-turn
-    markers present in the vocabulary (Gemma's <end_of_turn> is often missing from generation_config)."""
-    ids: set[int] = set()
-    configured = getattr(model.generation_config, "eos_token_id", None)
-    for value in ([configured] if isinstance(configured, int) else list(configured or [])):
-        ids.add(int(value))
-    for value in (tokenizer.eos_token_id, tokenizer.pad_token_id):
-        if value is not None:
-            ids.add(int(value))
-    convert, unk = getattr(tokenizer, "convert_tokens_to_ids", None), getattr(tokenizer, "unk_token_id", None)
-    for name in END_OF_TURN_TOKENS if convert else ():
-        value = convert(name)
-        if isinstance(value, int) and value >= 0 and value != unk:
-            ids.add(value)
-    return sorted(ids)
-
-
-def strip_trailing(ids, drop: set[int]):
-    """Remove trailing end / special tokens so the kept hidden state is the answer's last real token."""
-    end = len(ids)
-    while end and int(ids[end - 1]) in drop:
-        end -= 1
-    return ids[:end]
 
 
 def generate_with(model, tokenizer, records: Sequence[dict[str, Any]], device: str, system_prompt: str,
@@ -66,7 +31,6 @@ def generate_with(model, tokenizer, records: Sequence[dict[str, Any]], device: s
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
     stops = stop_token_ids(tokenizer, model)
-    trailing = set(stops) | {int(i) for i in getattr(tokenizer, "all_special_ids", [])}
     states, answers, last_tokens = [], [], []
     with torch.inference_mode():
         for i, record in enumerate(records):
@@ -77,10 +41,7 @@ def generate_with(model, tokenizer, records: Sequence[dict[str, Any]], device: s
             generated = model.generate(**encoded, max_new_tokens=max_new_tokens, do_sample=False, num_beams=1,
                                        use_cache=True, pad_token_id=tokenizer.pad_token_id,
                                        eos_token_id=stops)[0, encoded["input_ids"].shape[1]:]
-            answer_ids = strip_trailing(generated, trailing)
-            # Gemma writes "Golf.\n<end_of_turn>": also drop trailing whitespace-only tokens such as "\n".
-            while len(answer_ids) > 1 and not tokenizer.decode(answer_ids[-1:], skip_special_tokens=True).strip():
-                answer_ids = answer_ids[:-1]
+            answer_ids = answer_token_ids(generated, tokenizer, stops)
             replay_ids = torch.cat([encoded["input_ids"][0], answer_ids]).unsqueeze(0)
             replay = model(replay_ids, attention_mask=torch.ones_like(replay_ids), output_hidden_states=True,
                            use_cache=False, return_dict=True)
@@ -93,20 +54,9 @@ def generate_with(model, tokenizer, records: Sequence[dict[str, Any]], device: s
 
 
 def load_model(args):
-    import torch
-    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    revision = args.model_revision or None
-    config = AutoConfig.from_pretrained(args.model, revision=revision)
-    gemma = str(getattr(config, "model_type", "")).startswith("gemma")
-    dtype = torch.bfloat16 if gemma else compute_dtype(torch, args.device)  # Gemma 2 overflows in float16
-    kwargs: dict[str, Any] = {"revision": revision, "torch_dtype": dtype, "low_cpu_mem_usage": True}
-    if gemma:
-        kwargs["attn_implementation"] = "eager"  # Gemma 2 logit soft-capping is not supported by sdpa
-    if not args.no_4bit:
-        kwargs.update(quantization_config=BitsAndBytesConfig(
-            load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=dtype,
-            bnb_4bit_use_double_quant=True), device_map={"": args.device})
+    revision, kwargs = model_load_settings(args)
     tokenizer = AutoTokenizer.from_pretrained(args.model, revision=revision, use_fast=True)
     model = AutoModelForCausalLM.from_pretrained(args.model, **kwargs)
     if args.no_4bit:

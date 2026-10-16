@@ -93,6 +93,75 @@ def trim_terminal_tokens(generated_ids, tokenizer):
     return generated_ids[:end]
 
 
+def build_prompt(tokenizer, question: str, system_prompt: str) -> str:
+    """Chat prompt with the system instruction; templates that reject a system role get it prepended to the user turn."""
+    try:
+        return chat_prompt(tokenizer, question, system_prompt)
+    except Exception:
+        return tokenizer.apply_chat_template([{"role": "user", "content": f"{system_prompt}\n\n{question}"}],
+                                             tokenize=False, add_generation_prompt=True)
+
+
+END_OF_TURN_TOKENS = ("<end_of_turn>", "<|im_end|>", "<|eot_id|>", "<|end|>", "<|endoftext|>", "</s>")
+
+
+def stop_token_ids(tokenizer, model) -> list[int]:
+    """Ids that end an answer: the model's configured EOS ids, the tokenizer's EOS / pad, and known end-of-turn
+    markers present in the vocabulary (Gemma's <end_of_turn> is often missing from generation_config)."""
+    ids: set[int] = set()
+    configured = getattr(model.generation_config, "eos_token_id", None)
+    for value in ([configured] if isinstance(configured, int) else list(configured or [])):
+        ids.add(int(value))
+    for value in (tokenizer.eos_token_id, tokenizer.pad_token_id):
+        if value is not None:
+            ids.add(int(value))
+    convert, unk = getattr(tokenizer, "convert_tokens_to_ids", None), getattr(tokenizer, "unk_token_id", None)
+    for name in END_OF_TURN_TOKENS if convert else ():
+        value = convert(name)
+        if isinstance(value, int) and value >= 0 and value != unk:
+            ids.add(value)
+    return sorted(ids)
+
+
+def strip_trailing(ids, drop: set[int]):
+    """Remove trailing end / special tokens so the kept hidden state is the answer's last real token."""
+    end = len(ids)
+    while end and int(ids[end - 1]) in drop:
+        end -= 1
+    return ids[:end]
+
+
+def answer_token_ids(generated, tokenizer, stops):
+    """Generated ids without trailing stop / special tokens or whitespace-only tokens (Gemma: 'Golf.' '\\n'
+    '<end_of_turn>' '<eos>'), so the replayed hidden state belongs to the answer's last real token."""
+    drop = set(stops) | {int(i) for i in getattr(tokenizer, "all_special_ids", [])}
+    answer_ids = strip_trailing(generated, drop)
+    while len(answer_ids) > 1 and not tokenizer.decode(answer_ids[-1:], skip_special_tokens=True).strip():
+        answer_ids = answer_ids[:-1]
+    return answer_ids
+
+
+def model_load_settings(args):
+    """(revision, from_pretrained kwargs): 4-bit NF4 unless --no-4bit; Gemma gets bfloat16 + eager attention
+    (float16 overflows and sdpa lacks its logit soft-capping); a local model folder ignores the hub revision."""
+    import torch
+    from transformers import AutoConfig, BitsAndBytesConfig
+
+    revision = None if (not args.model_revision or Path(args.model).expanduser().is_dir()) else args.model_revision
+    config = AutoConfig.from_pretrained(args.model, revision=revision, cache_dir=getattr(args, "cache_dir", None))
+    gemma = str(getattr(config, "model_type", "")).startswith("gemma")
+    dtype = torch.bfloat16 if gemma else compute_dtype(torch, args.device)
+    kwargs = {"revision": revision, "cache_dir": getattr(args, "cache_dir", None), "torch_dtype": dtype,
+              "low_cpu_mem_usage": True}
+    if gemma:
+        kwargs["attn_implementation"] = "eager"
+    if not args.no_4bit:
+        kwargs.update(quantization_config=BitsAndBytesConfig(
+            load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=dtype,
+            bnb_4bit_use_double_quant=True), device_map={"": args.device})
+    return revision, kwargs
+
+
 def stack_last_token_features(hidden_states, torch):
     """Stack embedding/output-layer states at the final replayed answer token."""
     return torch.stack([hidden[0, -1].float().cpu() for hidden in hidden_states], dim=0)
@@ -104,15 +173,14 @@ def ensure_generation(
     output_dir: Path,
 ) -> None:
     import torch
-    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
     if str(args.device).startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable; enable a Kaggle GPU accelerator")
     if not args.no_4bit and not str(args.device).startswith("cuda"):
         raise ValueError("4-bit bitsandbytes loading requires CUDA; use --no-4bit for CPU")
-    config = AutoConfig.from_pretrained(
-        args.model, revision=args.model_revision, cache_dir=args.cache_dir
-    )
+    revision, load_kwargs = model_load_settings(args)
+    config = AutoConfig.from_pretrained(args.model, revision=revision, cache_dir=args.cache_dir)
     incomplete: list[str] = []
     for domain, records in records_by_domain.items():
         manifest = generation_manifest(
@@ -140,32 +208,14 @@ def ensure_generation(
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model, revision=args.model_revision, cache_dir=args.cache_dir, use_fast=True
-    )
+    tokenizer = AutoTokenizer.from_pretrained(args.model, revision=revision, cache_dir=args.cache_dir, use_fast=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
-    dtype = compute_dtype(torch, args.device)
-    load_kwargs: dict[str, Any] = {
-        "revision": args.model_revision,
-        "cache_dir": args.cache_dir,
-        "torch_dtype": dtype,
-        "low_cpu_mem_usage": True,
-    }
-    if not args.no_4bit:
-        load_kwargs.update(
-            quantization_config=BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=dtype,
-                bnb_4bit_use_double_quant=True,
-            ),
-            device_map={"": args.device},
-        )
     model = AutoModelForCausalLM.from_pretrained(args.model, **load_kwargs)
     if args.no_4bit:
         model = model.to(args.device)
     model.eval()
+    stops = stop_token_ids(tokenizer, model)
     try:
         for domain in incomplete:
             records = records_by_domain[domain]
@@ -192,12 +242,14 @@ def ensure_generation(
                     example_id = str(record["id"])
                     if example_id in completed:
                         continue
-                    prompt = chat_prompt(tokenizer, record["input_text"], args.system_prompt)
+                    prompt = build_prompt(tokenizer, record["input_text"], args.system_prompt)
+                    # Chat templates already contain their special tokens (Gemma's <bos>); do not add them twice.
                     encoded = tokenizer(
                         prompt,
                         return_tensors="pt",
                         truncation=True,
                         max_length=args.max_input_tokens,
+                        add_special_tokens=False,
                     ).to(args.device)
                     generated = model.generate(
                         **encoded,
@@ -206,9 +258,9 @@ def ensure_generation(
                         num_beams=1,
                         use_cache=True,
                         pad_token_id=tokenizer.pad_token_id,
-                        eos_token_id=tokenizer.eos_token_id,
+                        eos_token_id=stops,
                     )[0, encoded["input_ids"].shape[1]:]
-                    answer_ids = trim_terminal_tokens(generated, tokenizer)
+                    answer_ids = answer_token_ids(generated, tokenizer, stops)
                     replay_ids = torch.cat([encoded["input_ids"][0], answer_ids]).unsqueeze(0)
                     replay = model(
                         replay_ids,

@@ -90,6 +90,9 @@ class Detector:
         return cls(torch.load(Path(path), map_location="cpu", weights_only=False), device)
 
     def resolve(self, shape: tuple[int, int], llm: str | None = None, any_layers: bool = False) -> str:
+        exact = [n for n, (layers, hidden, _) in self.llms.items() if (layers, hidden) == tuple(shape)]
+        if any_layers and llm is None and len(exact) == 1:
+            return exact[0]  # several LLMs of equal width: the layer count tells them apart
         if any_layers:  # layer count is adapted by pooling; only the hidden size has to match
             names = [n for n, (_, hidden, _) in self.llms.items() if hidden == shape[1] and llm in (None, n)]
             if len(names) != 1:

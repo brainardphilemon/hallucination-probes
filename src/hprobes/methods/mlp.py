@@ -24,8 +24,10 @@ def run(args, data, device):
     if len(set(counts.values())) != 1:
         raise SystemExit(f"LLMs end with different pooled layer counts {counts}; pass --pool-layers 15 (or similar)")
     pooled = next(iter(counts.values()))
-    if len(data.models) > 1 and not args.pca_dim:
+    if len({hidden for _, hidden in data.models.values()}) > 1 and not args.pca_dim:
         raise SystemExit("Several LLMs have different hidden sizes: use --pca-dim (one PCA per LLM and layer)")
+    # Several LLMs (different layer counts) or standardization need the features in memory, one dataset at a time.
+    in_memory = bool(args.pca_dim) or args.standardize or len(data.models) > 1
     seed_everything(args.seed)
     splits = {"train": StateDataset(data.sources, "train"), "val": StateDataset(data.sources, "val"),
               "test": StateDataset(data.sources, "test")}
@@ -59,13 +61,13 @@ def run(args, data, device):
             return torch.cat([pcas[d.model].transform(pooled_matrix(StateDataset([d], split), args, device),
                                                       device).flatten(1) for d in domains])
 
-    elif args.standardize:
-        # No reduction: the pooled states themselves, kept in memory so they can be standardized.
+    elif in_memory:
+        # No reduction: the pooled states themselves, kept in memory (standardization / several LLMs).
         def project(domains, split):
             return torch.cat([pooled_matrix(StateDataset([d], split), args, device).flatten(1) for d in domains])
 
     standardizers = {}
-    if args.pca_dim or args.standardize:
+    if in_memory:
         x = {"train": project(data.sources, "train"), "val": project(data.sources, "val"),
              "test": project(data.sources, "test")}
         x.update({f"target:{d.name}": project([d], "all") for d in data.targets})

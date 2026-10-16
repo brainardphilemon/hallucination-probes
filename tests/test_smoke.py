@@ -471,3 +471,57 @@ def test_standardize_train_and_predict(artifacts, tmp_path, extra):
     assert abs(float(g.mean())) < 1e-3 and abs(float(g.std()) - 1) < 0.05
     out = detector.predict(loud, standardize_on_input=True)["raw_logit"]
     assert np.isfinite(out).all() and np.abs(out).max() < 50
+
+
+def test_joint_mlp_two_llms_same_width_without_pca(tmp_path):
+    """Qwen-like (9 layers) and Gemma-like (12 layers) with equal hidden size: one MLP, per-LLM standardization."""
+    import torch
+
+    from hprobes.predict import Detector
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    for name, seed in (("tqa", 1), ("sciq", 2), ("triviaqa", 3)):
+        write_domain(a, name, seed, 0.0, 9, 32)
+    for name, seed in (("tqa", 4), ("sciq", 5), ("triviaqa", 6)):
+        write_domain(b, name, seed, 3.0, 12, 32)   # louder "model"
+    out = tmp_path / "joint"
+    main(["train", "--method", "mlp", "--artifact-dir", f"qwen={a}", f"gemma={b}", "--output-dir", str(out),
+          "--device", "cpu", "--sources", "qwen:tqa", "qwen:sciq", "gemma:tqa", "gemma:sciq",
+          "--targets", "qwen:triviaqa", "gemma:triviaqa", "--epochs", "2", "--num-workers", "0",
+          "--pooling", "logsumexp", "--pool-layers", "5", "--standardize"])
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["standardized"] and set(summary["target_metrics"]) == {"qwen:triviaqa", "gemma:triviaqa"}
+    bundle = torch.load(out / "model.pt", weights_only=False)
+    assert set(bundle["models"]) == {"qwen", "gemma"} and all(m["standardize"] for m in bundle["models"].values())
+    det = Detector.load(out / "model.pt")
+    rows = list(csv.DictReader((out / "results.csv").open()))
+    for llm, root in (("qwen", a), ("gemma", b)):
+        expected = [float(r["sala_probability"]) for r in rows if r["target_domain"] == f"{llm}:triviaqa"]
+        got = det.predict(np.load(root / "generation" / "triviaqa" / "features.npy"))["probability_correct"]
+        assert np.allclose(got, expected, atol=1e-4), llm   # picks each LLM's own statistics by shape
+
+
+def test_model_load_settings_gemma_vs_qwen(tmp_path):
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from types import SimpleNamespace
+
+    from hprobes.extract import answer_token_ids, model_load_settings
+
+    for name, config in (("qwen", transformers.Qwen2Config(hidden_size=16, num_hidden_layers=1, num_attention_heads=2)),
+                         ("gemma", transformers.Gemma2Config(hidden_size=16, num_hidden_layers=1, num_attention_heads=2,
+                                                             head_dim=8))):
+        config.save_pretrained(tmp_path / name)
+        revision, kwargs = model_load_settings(SimpleNamespace(model=str(tmp_path / name), model_revision="abc123",
+                                                               device="cpu", no_4bit=True, cache_dir=None))
+        assert revision is None   # local folder: hub revision ignored
+        assert (kwargs.get("attn_implementation") == "eager") == (name == "gemma")
+        assert (kwargs["torch_dtype"] == torch.bfloat16) == (name == "gemma")
+
+    class Tok:
+        all_special_ids = [1, 107]
+
+        def decode(self, ids, skip_special_tokens=True):
+            return {9: "\n", 20: "Golf", 21: "."}.get(int(ids[0]), "")
+
+    assert answer_token_ids([20, 21, 9, 107, 1], Tok(), [1]) == [20, 21]
