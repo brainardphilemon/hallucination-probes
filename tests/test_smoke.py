@@ -239,3 +239,39 @@ def test_self_pca_across_llms(tmp_path):
           "llama:triviaqa", "--epochs", "2", "--num-workers", "0", "--pooling", "logsumexp", "--pool-layers", "5",
           "--pca-dim", "8", "--pca-fit", "self"])
     assert json.loads((tmp_path / "o" / "summary.json").read_text())["mlp_input_dimension"] == 40
+
+
+def test_fixed_reductions_are_data_free():
+    import torch
+
+    from hprobes.features import dct_basis, fixed_reduce
+
+    x = torch.randn(6, 4, 40)
+    basis = dct_basis(40, 40)
+    assert torch.allclose(basis.T @ basis, torch.eye(40), atol=1e-5)  # orthonormal
+    assert torch.allclose(fixed_reduce(x, 8, "avg", norm="none"), x.reshape(6, 4, 8, 5).mean(-1), atol=1e-5)
+    for method in ("avg", "dct"):
+        for hidden, dim in ((40, 8), (7, 8), (300, 8)):
+            batch = torch.randn(5, 3, hidden)
+            z = fixed_reduce(batch, dim, method)
+            assert z.shape == (5, 3, dim) and torch.isfinite(z).all()
+            assert torch.allclose(z[2:3], fixed_reduce(batch[2:3], dim, method), atol=1e-5)  # per-example, no batch needed
+    constant = torch.ones(1, 1, 40)  # DCT of a constant keeps only the DC term
+    assert fixed_reduce(constant, 5, "dct", norm="none")[0, 0, 1:].abs().max() < 1e-5
+
+
+@pytest.mark.parametrize("method", ["avg", "dct"])
+def test_train_and_predict_with_fixed_reduction(artifacts, tmp_path, method):
+    from hprobes.predict import Detector
+
+    summary = train(artifacts, tmp_path, "--method", "mlp", "--pooling", "logsumexp", "--pool-layers", "5",
+                    "--pca-dim", "8", "--pca-fit", method)
+    assert summary["mlp_input_dimension"] == 40
+    detector = Detector.load(tmp_path / "run" / "model.pt")
+    with (tmp_path / "run" / "results.csv").open() as f:
+        expected = [float(r["sala_probability"]) for r in csv.DictReader(f)]
+    features = np.load(artifacts / "generation" / "triviaqa" / "features.npy")
+    assert np.allclose(detector.predict(features)["probability_correct"], expected, atol=1e-4)
+    assert np.allclose(detector.predict(features[:1])["probability_correct"], expected[:1], atol=1e-4)  # one example works
+    other = np.random.default_rng(1).normal(size=(3, 40, 100)).astype(np.float16)  # another LLM's shape
+    assert detector.predict(other)["probability_correct"].shape == (3,)

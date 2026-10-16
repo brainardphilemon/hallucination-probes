@@ -71,6 +71,7 @@ class Detector:
         self.device = torch.device(device if device != "cuda" or torch.cuda.is_available() else "cpu")
         self.threshold = float(bundle["threshold"])
         self.adaptive = bundle.get("pca_fit") == "self"  # PCA is recomputed from the input itself
+        self.fixed = bundle.get("pca_fit") in ("avg", "dct")  # data-free reduction of each example
         models = bundle.get("models") or {"default": {"n_layers": bundle["n_layers"], "hidden_size": bundle["hidden_size"],
                                                       "pca": bundle["pca"]}}
         self.llms = {name: (int(m["n_layers"]), int(m["hidden_size"]),
@@ -115,7 +116,7 @@ class Detector:
             raise ValueError(f"Expected hidden states of shape (N, layers, hidden) or (layers, hidden); "
                              f"got {tuple(x.shape)}")
         b = self.bundle
-        pca = None if self.adaptive else self.llms[self.resolve(tuple(x.shape[1:]), llm)][2]
+        pca = None if self.adaptive or self.fixed else self.llms[self.resolve(tuple(x.shape[1:]), llm)][2]
 
         def pooled(chunk):
             return pool_layers(chunk.to(self.device).float(), b["pooling"], b["pool_kernel"], b["pool_stride"],
@@ -134,6 +135,11 @@ class Detector:
             for start in range(0, len(x), batch_size):
                 if self.adaptive:
                     features = features_all[start:start + batch_size]
+                elif self.fixed:
+                    from hprobes.features import fixed_reduce
+
+                    features = fixed_reduce(pooled(x[start:start + batch_size]).cpu(), b["pca_dim"], b["pca_fit"],
+                                            b["pca_scope"], b.get("reduce_norm", "rms"), self.device).flatten(1)
                 else:
                     block = pooled(x[start:start + batch_size])
                     features = pca.transform(block, self.device).flatten(1) if pca else block.flatten(1)

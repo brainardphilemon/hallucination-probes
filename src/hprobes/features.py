@@ -127,6 +127,52 @@ def self_pca(x, dim: int, scope: str = "per-layer", seed: int = 42, device=None)
     return torch.stack(parts, dim=1)
 
 
+def dct_basis(width: int, keep: int, device=None):
+    """Orthonormal DCT-II basis (width, keep): column k is the k-th cosine over the hidden axis."""
+    import math
+
+    import torch
+
+    positions = torch.arange(width, device=device, dtype=torch.float32)
+    frequencies = torch.arange(keep, device=device, dtype=torch.float32)
+    basis = torch.cos(math.pi * (positions[:, None] + 0.5) * frequencies[None, :] / width) * math.sqrt(2.0 / width)
+    basis[:, 0] /= math.sqrt(2.0)
+    return basis
+
+
+def fixed_reduce(x, dim: int, method: str = "dct", scope: str = "per-layer", norm: str = "rms", device=None):
+    """Data-free reduction of the hidden axis to ``dim`` values, applied to each example on its own.
+
+    x: (rows, layers, hidden) CPU tensor -> (rows, groups, dim) CPU float32. Nothing is fitted or stored, so any
+    hidden size works and a single example is enough.
+      avg: mean of ``dim`` contiguous bins of neighbouring hidden units.
+      dct: first ``dim`` coefficients of the orthonormal DCT-II along the hidden axis (low frequencies).
+    Both assume neighbouring hidden units are related, which hidden states do not guarantee. Widths below
+    ``dim`` are zero-padded. norm='rms' divides every (example, group) vector by its root-mean-square so
+    huge activations in a few units do not dominate the MLP input (amplitude information is dropped).
+    """
+    import torch
+    from torch.nn import functional as F
+
+    if method not in ("avg", "dct"):
+        raise ValueError(f"Unknown fixed reduction {method!r}")
+    n, layers, hidden = x.shape
+    device = device or torch.device("cpu")
+    flat = x.reshape(n * layers, hidden) if scope == "per-layer" else x.reshape(n, layers * hidden)
+    keep = min(dim, flat.shape[1])
+    basis = dct_basis(flat.shape[1], keep, device) if method == "dct" else None
+    out = []
+    with torch.no_grad():
+        for start in range(0, len(flat), 2048):
+            block = flat[start:start + 2048].to(device).float()
+            z = block @ basis if method == "dct" else F.adaptive_avg_pool1d(block[:, None, :], keep)[:, 0]
+            out.append(F.pad(z, (0, dim - keep)).cpu())
+    z = torch.cat(out)
+    if norm == "rms":
+        z = z / z.square().mean(-1, keepdim=True).sqrt().clamp(min=1e-8)
+    return z.reshape(n, layers if scope == "per-layer" else 1, dim)
+
+
 class LayerPCA:
     """PCA fitted on source-train rows only: one PCA over all features ('global') or one per layer."""
 

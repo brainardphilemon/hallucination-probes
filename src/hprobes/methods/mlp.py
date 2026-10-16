@@ -8,7 +8,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 
 from hprobes.data import StateDataset
-from hprobes.features import LayerPCA, pool_layers, pooled_layer_count, pooled_matrix, self_pca
+from hprobes.features import LayerPCA, pool_layers, pooled_layer_count, pooled_matrix, self_pca, fixed_reduce
 from hprobes.losses import make_loss
 from hprobes.training import fit, predict, residual_mlp, seed_everything, tensor_loader
 
@@ -32,14 +32,17 @@ def run(args, data, device):
     splits.update({f"target:{d.name}": StateDataset([d], "all") for d in data.targets})
     labels = {name: [entry[2] for entry in ds.entries] for name, ds in splits.items()}
     pcas = {}
-    if args.pca_dim and args.pca_fit == "self":
-        # PCA acts like pooling: every dataset is projected with components computed from its own rows
-        # (unsupervised, nothing stored), so any LLM and any hidden size end up as pooled_layers x pca_dim.
+    if args.pca_dim and args.pca_fit in ("self", "avg", "dct"):
+        # The reduction acts like pooling and stores nothing: "self" computes PCA components from the rows it is
+        # applied to (unsupervised); "avg" / "dct" are fixed data-free maps. Any LLM and any hidden size end up
+        # as pooled_layers x pca_dim.
         projected = {}
         for d in [*data.sources, *data.targets]:
             everything = SimpleNamespace(features=d.features, labels=d.labels, split={"all": np.arange(len(d.labels))})
-            projected[d.name] = self_pca(pooled_matrix(StateDataset([everything], "all"), args, device),
-                                         args.pca_dim, args.pca_scope, args.seed, device).flatten(1)
+            pooled_d = pooled_matrix(StateDataset([everything], "all"), args, device)
+            reduced = (self_pca(pooled_d, args.pca_dim, args.pca_scope, args.seed, device) if args.pca_fit == "self"
+                       else fixed_reduce(pooled_d, args.pca_dim, args.pca_fit, args.pca_scope, args.reduce_norm, device))
+            projected[d.name] = reduced.flatten(1)
 
         def project(domains, split):
             return torch.cat([projected[d.name][torch.as_tensor(d.split[split])] for d in domains])
@@ -93,7 +96,7 @@ def run(args, data, device):
         "pooling": args.pooling, "pool_kernel": args.pool_kernel, "pool_stride": args.pool_stride,
         "pool_layers": args.pool_layers,
         "pca_fit": args.pca_fit if args.pca_dim else None, "pca_dim": args.pca_dim, "pca_scope": args.pca_scope,
-        "pca_seed": args.seed,
+        "pca_seed": args.seed, "reduce_norm": args.reduce_norm,
         "models": {name: {"n_layers": layers, "hidden_size": hidden,
                           "pca": pcas[name].state() if pcas else None}
                    for name, (layers, hidden) in data.models.items()},
@@ -102,7 +105,7 @@ def run(args, data, device):
         "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
     })
     summary = {"pooled_layers": pooled, "mlp_input_dimension": input_dim,
-               "pca": {name: p.summary() for name, p in pcas.items()} or ({"fit": "self", "dim": args.pca_dim}
+               "pca": {name: p.summary() for name, p in pcas.items()} or ({"fit": args.pca_fit, "dim": args.pca_dim}
                                                                          if args.pca_dim else None),
                "parameters": sum(p.numel() for p in model.parameters()),
                "best_source_val_auroc": best_auc, "best_epoch": best_epoch, "history": history}

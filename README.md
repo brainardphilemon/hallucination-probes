@@ -125,6 +125,17 @@ labels), per layer, signs fixed, ordered by variance, scaled by the layer's RMS 
 `--pool-layers 15 --pca-dim 512`, any layer count and hidden size become 15 x 512. Needs a batch of at least 2
 examples at inference (ideally more than the PCA dimension). Whether the MLP transfers across LLMs this way is untested.
 
+### Data-free reductions (`--pca-fit avg` / `dct`)
+
+Nothing is fitted or stored, and one example is enough: `avg` takes the mean of `--pca-dim` bins of neighbouring
+hidden units, `dct` keeps the first `--pca-dim` coefficients of the orthonormal DCT along the hidden axis. Each layer's
+vector is then divided by its RMS (`--reduce-norm none` to disable). Both assume neighbouring hidden units are related,
+which hidden states need not satisfy, so expect them to be weaker than PCA; compare on held-out data.
+
+```bash
+hprobes train --method mlp ... --pooling logsumexp --pool-layers 15 --pca-dim 512 --pca-fit dct
+```
+
 ### Several LLMs, one MLP
 
 `hprobes train --method mlp --artifact-dir qwen=<dir> llama=<dir> --sources qwen:tqa llama:tqa ... --targets llama:triviaqa
