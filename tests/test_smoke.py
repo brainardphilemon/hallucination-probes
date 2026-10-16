@@ -406,3 +406,40 @@ def test_import_legacy_without_pca_is_exact_and_diagnosable(artifacts, tmp_path)
     deeper = np.random.default_rng(0).normal(size=(4, 15, HIDDEN)).astype(np.float16)
     results = report(tmp_path / "nopca.pt", {"ref": features, "deeper": deeper}, reference="ref")
     assert results["deeper"]["pca"].shape == (4, 5, HIDDEN) and results["deeper"]["matches_detector"] < 1e-4
+
+
+def test_generate_drops_trailing_newline_before_end_of_turn():
+    """Gemma answers 'Golf.' + '\\n' + <end_of_turn>; the kept token must be '.', not the newline (seen on Kaggle)."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from hprobes.generate import generate_with
+
+    NEWLINE, END = 9, 7
+
+    class Tok:
+        eos_token_id, pad_token_id = 1, 0
+        all_special_ids = [0, 1, END]
+
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+            return messages[-1]["content"]
+
+        def __call__(self, text, return_tensors=None, truncation=False, max_length=None, add_special_tokens=True):
+            return transformers.BatchEncoding({"input_ids": torch.tensor([[11, 12, 13]])})
+
+        def decode(self, ids, skip_special_tokens=True):
+            return "".join("\n" if int(i) == NEWLINE else ("" if int(i) in self.all_special_ids else "x")
+                           for i in ids)
+
+    class FakeModel(torch.nn.Module):
+        generation_config = type("G", (), {"eos_token_id": 1})()
+
+        def generate(self, input_ids, **kwargs):  # answer tokens 20, 21, then newline, end-of-turn, eos
+            return torch.cat([input_ids, torch.tensor([[20, 21, NEWLINE, END, 1]])], dim=1)
+
+        def forward(self, ids, **kwargs):
+            seen.append(ids[0].tolist())
+            return type("O", (), {"hidden_states": [torch.zeros(1, ids.shape[1], 4)] * 3})()
+
+    seen = []
+    _, answers, last = generate_with(FakeModel(), Tok(), [{"input_text": "q"}], "cpu", "sys", log_every=0)
+    assert seen[0] == [11, 12, 13, 20, 21]   # replay ends at the answer's last real token

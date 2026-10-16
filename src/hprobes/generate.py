@@ -78,6 +78,9 @@ def generate_with(model, tokenizer, records: Sequence[dict[str, Any]], device: s
                                        use_cache=True, pad_token_id=tokenizer.pad_token_id,
                                        eos_token_id=stops)[0, encoded["input_ids"].shape[1]:]
             answer_ids = strip_trailing(generated, trailing)
+            # Gemma writes "Golf.\n<end_of_turn>": also drop trailing whitespace-only tokens such as "\n".
+            while len(answer_ids) > 1 and not tokenizer.decode(answer_ids[-1:], skip_special_tokens=True).strip():
+                answer_ids = answer_ids[:-1]
             replay_ids = torch.cat([encoded["input_ids"][0], answer_ids]).unsqueeze(0)
             replay = model(replay_ids, attention_mask=torch.ones_like(replay_ids), output_hidden_states=True,
                            use_cache=False, return_dict=True)
