@@ -63,6 +63,8 @@ def add_train_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--pooling", choices=POOLING, default="none", help="Pool hidden states across layers")
     g.add_argument("--pool-kernel", type=int, default=3, help="Layers per pooling window")
     g.add_argument("--pool-stride", type=int, default=2)
+    g.add_argument("--pool-layers", type=int, default=0,
+                   help="Pool any number of layers down to exactly this many (e.g. 15); 0 = use kernel/stride")
     g.add_argument("--pca-dim", type=int, default=0, help="PCA components fitted on source-train (0 = off; mlp, sala)")
     g.add_argument("--pca-scope", choices=("global", "per-layer"), default="per-layer",
                    help="One PCA over all features or one per (pooled) layer")

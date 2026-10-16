@@ -14,7 +14,7 @@ LAST_MODEL: dict = {}  # filled by run(); cli.train() writes it to <output-dir>/
 
 
 def run(args, data, device):
-    pooled = pooled_layer_count(data.n_layers, args.pooling, args.pool_kernel, args.pool_stride)
+    pooled = pooled_layer_count(data.n_layers, args.pooling, args.pool_kernel, args.pool_stride, args.pool_layers)
     seed_everything(args.seed)
     splits = {"train": StateDataset(data.sources, "train"), "val": StateDataset(data.sources, "val"),
               "test": StateDataset(data.sources, "test")}
@@ -48,7 +48,7 @@ def run(args, data, device):
 
         def step(batch):
             states = pool_layers(batch[0].to(device, non_blocking=True).float(), args.pooling,
-                                 args.pool_kernel, args.pool_stride)
+                                 args.pool_kernel, args.pool_stride, args.pool_layers)
             return model(states.flatten(1)), batch[1].to(device, non_blocking=True)
     print(f"mlp: pooling={args.pooling} -> {pooled} layers x {data.hidden_size}; input={input_dim}; "
           f"head={args.hidden_layers}x{args.hidden_dim}; train/val/test="
@@ -59,7 +59,7 @@ def run(args, data, device):
     logits = {name: predict(model, loader, step, device, args) for name, loader in loaders.items()}
     LAST_MODEL.clear()
     LAST_MODEL.update({
-        "pooling": args.pooling, "pool_kernel": args.pool_kernel, "pool_stride": args.pool_stride,
+        "pooling": args.pooling, "pool_kernel": args.pool_kernel, "pool_stride": args.pool_stride, "pool_layers": args.pool_layers,
         "n_layers": data.n_layers, "hidden_size": data.hidden_size,
         "pca": pca.state() if pca else None,
         "head": {"input_dim": input_dim, "hidden_dim": args.hidden_dim, "hidden_layers": args.hidden_layers,

@@ -58,7 +58,7 @@ def run(args, data, device):
         raise SystemExit("--pca-dim is supported by --method mlp and sala")
     use_image, use_text = args.fusion_mode in ("fused", "image"), args.fusion_mode in ("fused", "text")
     finetune = use_text and args.finetune_text_encoder
-    tokens = pooled_layer_count(data.n_layers, args.pooling, args.pool_kernel, args.pool_stride)
+    tokens = pooled_layer_count(data.n_layers, args.pooling, args.pool_kernel, args.pool_stride, args.pool_layers)
     domains = [*data.sources, *data.targets]
     seed_everything(args.seed)
     text, width = {}, 0
@@ -123,7 +123,7 @@ def run(args, data, device):
         with torch.inference_mode():
             for states, _, _, _ in DataLoader(splits["train"], batch_size=256, collate_fn=collate):
                 image = pool_layers(states.to(device).float(), args.pooling, args.pool_kernel,
-                                    args.pool_stride).cpu().double()
+                                    args.pool_stride, args.pool_layers).cpu().double()
                 total += image.sum(0)
                 total_sq += image.square().sum(0)
         n = len(splits["train"])
@@ -161,7 +161,7 @@ def run(args, data, device):
             parts = [self.cls.expand(b, -1, -1)]
             masks = [torch.zeros(b, 1, dtype=torch.bool, device=lengths.device)]
             if use_image:
-                image = pool_layers(states.float(), args.pooling, args.pool_kernel, args.pool_stride)
+                image = pool_layers(states.float(), args.pooling, args.pool_kernel, args.pool_stride, args.pool_layers)
                 image = ((image - self.feature_mean) / self.feature_std).clamp(-args.feature_clip, args.feature_clip)
                 parts.append(self.layer_proj(image) + self.layer_pos + self.type_embed.weight[0])
                 masks.append(torch.full((b, tokens), drop_image, dtype=torch.bool, device=lengths.device))

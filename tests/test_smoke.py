@@ -151,3 +151,25 @@ def test_import_legacy_roundtrip(artifacts, tmp_path):
     assert report["max_abs_probability_diff"] < 1e-5
     assert abs(report["target_auroc_rebuilt"] - report["target_auroc_original"]) < 1e-6
     assert Detector.load(tmp_path / "rebuilt.pt").threshold == summary["threshold"]
+
+
+@pytest.mark.parametrize("pooling", ["logsumexp", "max"])
+def test_adaptive_pooling_matches_kernel_pooling_for_qwen(pooling):
+    import torch
+
+    x = torch.randn(4, 29, 16)
+    assert torch.allclose(pool_layers(x, pooling, 3, 2, 15), pool_layers(x, pooling, 3, 2), atol=1e-6)
+
+
+@pytest.mark.parametrize("layers", [2, 15, 16, 24, 32, 33, 80])
+def test_adaptive_pooling_any_layer_count(layers):
+    import torch
+
+    out = pool_layers(torch.randn(2, layers, 8), "logsumexp", 3, 2, 15) if layers >= 2 else None
+    assert out.shape == (2, 15, 8) and torch.isfinite(out).all()
+
+
+def test_pool_layers_option_end_to_end(artifacts, tmp_path):
+    summary = train(artifacts, tmp_path, "--method", "mlp", "--pooling", "logsumexp", "--pool-layers", "5",
+                    "--pca-dim", "8")
+    assert summary["mlp_input_dimension"] == 5 * 8

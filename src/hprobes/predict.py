@@ -95,7 +95,7 @@ class Detector:
         with torch.inference_mode():
             for start in range(0, len(x), batch_size):
                 block = x[start:start + batch_size].to(self.device).float()
-                block = pool_layers(block, b["pooling"], b["pool_kernel"], b["pool_stride"])
+                block = pool_layers(block, b["pooling"], b["pool_kernel"], b["pool_stride"], b.get("pool_layers", 0))
                 features = self.pca.transform(block, self.device).flatten(1).to(self.device) if self.pca \
                     else block.flatten(1)
                 out.append(self.model(features).float().cpu())

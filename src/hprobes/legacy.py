@@ -51,7 +51,7 @@ def rebuild(run_dir: Path, artifact_dir: Path, output: Path, device: str = "cuda
     if pca_dim:
         scope = "per-layer" if summary.get("feature_pca_per_layer") else "global"
         pca = LayerPCA(pca_dim, scope, seed)
-        pooled_args = SimpleNamespace(pooling=pooling, pool_kernel=kernel, pool_stride=stride)
+        pooled_args = SimpleNamespace(pooling=pooling, pool_kernel=kernel, pool_stride=stride, pool_layers=0)
         print(f"Refitting {scope} PCA({pca_dim}) on {len(StateDataset(data.sources, 'train'))} source-train rows",
               flush=True)
         with torch.inference_mode():
@@ -60,7 +60,7 @@ def rebuild(run_dir: Path, artifact_dir: Path, output: Path, device: str = "cuda
 
     state = {k: v.cpu() for k, v in saved["model"].items()}
     bundle = {
-        "format": BUNDLE_FORMAT, "pooling": pooling, "pool_kernel": kernel, "pool_stride": stride,
+        "format": BUNDLE_FORMAT, "pooling": pooling, "pool_kernel": kernel, "pool_stride": stride, "pool_layers": 0,
         "n_layers": data.n_layers, "hidden_size": data.hidden_size, "pca": pca_state,
         "head": {"input_dim": int(saved["input_dim"]), "hidden_dim": int(saved["hidden_dim"]),
                  "hidden_layers": int(saved["hidden_layers"]), "dropout": 0.2},

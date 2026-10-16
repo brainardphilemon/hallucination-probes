@@ -27,9 +27,9 @@ def pooled_store(domain, args, device, cache_dir: Path):
 
     if args.pooling == "none":
         return domain.features
-    path = cache_dir / f"{domain.name}_{args.pooling}_k{args.pool_kernel}_s{args.pool_stride}.npy"
+    path = cache_dir / f"{domain.name}_{args.pooling}_k{args.pool_kernel}_s{args.pool_stride}_n{args.pool_layers}.npy"
     rows = len(domain.features)
-    layers = pooled_layer_count(domain.features.shape[1], args.pooling, args.pool_kernel, args.pool_stride)
+    layers = pooled_layer_count(domain.features.shape[1], args.pooling, args.pool_kernel, args.pool_stride, args.pool_layers)
     if path.exists():
         store = np.load(path, mmap_mode="r")
         if store.shape == (rows, layers, domain.features.shape[2]):
@@ -41,7 +41,7 @@ def pooled_store(domain, args, device, cache_dir: Path):
         for start in range(0, rows, 256):
             block = torch.from_numpy(np.asarray(domain.features[start:start + 256], dtype=np.float32)).to(device)
             store[start:start + 256] = pool_layers(block, args.pooling, args.pool_kernel,
-                                                   args.pool_stride).cpu().numpy().astype(np.float16)
+                                                   args.pool_stride, args.pool_layers).cpu().numpy().astype(np.float16)
     store.flush()
     return np.load(path, mmap_mode="r")
 
@@ -100,7 +100,7 @@ def run(args, data, device):
     output_dir = Path(args.output_dir)
     cache_dir = output_dir / "_pooled_cache"
     stores = {d.name: pooled_store(d, args, device, cache_dir) for d in [*data.sources, *data.targets]}
-    layers = pooled_layer_count(data.n_layers, args.pooling, args.pool_kernel, args.pool_stride)
+    layers = pooled_layer_count(data.n_layers, args.pooling, args.pool_kernel, args.pool_stride, args.pool_layers)
     y_train, y_val = data.labels("train"), data.labels("val")
     dom_train = np.concatenate([np.full(len(d.split["train"]), i) for i, d in enumerate(data.sources)])
     if args.lodo_dim and len(data.sources) < 2:
@@ -116,7 +116,7 @@ def run(args, data, device):
     # Refuse to resume per-layer checkpoints produced with different settings.
     prepare_manifest(output_dir / "sala_layers" / "manifest.json", {
         "sources": [d.name for d in data.sources], "targets": [d.name for d in data.targets],
-        **{k: getattr(args, k) for k in ("pooling", "pool_kernel", "pool_stride", "pca_dim", "proj_dim",
+        **{k: getattr(args, k) for k in ("pooling", "pool_kernel", "pool_stride", "pool_layers", "pca_dim", "proj_dim",
                                           "lodo_dim", "proj_dim_candidates", "epochs_proj",
                                           "epochs_proj_selection", "epochs_probe_selection", "lam_inv",
                                           "lam_sep", "lam_reg", "seed", "bleurt_threshold")}})

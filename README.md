@@ -44,7 +44,7 @@ Every combination below is set by flags:
 |---|---|
 | Method | `--method sala` (per-layer invariant projections → MLP), `mlp` (SALA without projections: states → MLP), `fusion`, `vlm`, `polysemantic` |
 | Datasets | `--sources tqa sciq ... --targets triviaqa [nq_open ...]` or `--preset G14_6SRC` |
-| Layer pooling | `--pooling none \| max \| mean \| logsumexp` with `--pool-kernel 3 --pool-stride 2` (29 → 15 layers) |
+| Layer pooling | `--pooling none \| max \| mean \| logsumexp` with `--pool-kernel 3 --pool-stride 2` (29 → 15 layers), or `--pool-layers 15` to always end with 15 layers whatever the model's layer count |
 | PCA | `--pca-dim 512` (0 = off) with `--pca-scope per-layer \| global`; fitted on source-train only. `mlp` supports both scopes; `sala` supports per-layer only |
 | Loss | `--loss bce \| focal \| logit_adjusted` (`--focal-alpha 0.25 --focal-gamma 2`) |
 | MLP head | `--hidden-dim`, `--hidden-layers`, `--dropout` |

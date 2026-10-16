@@ -34,7 +34,7 @@ def run(args, data, device):
 
     if args.pca_dim:
         raise SystemExit("--pca-dim is supported by --method mlp and sala")
-    rows_in_image = pooled_layer_count(data.n_layers, args.pooling, args.pool_kernel, args.pool_stride)
+    rows_in_image = pooled_layer_count(data.n_layers, args.pooling, args.pool_kernel, args.pool_stride, args.pool_layers)
     if data.hidden_size % args.patch_width:
         raise SystemExit(f"--patch-width must divide the hidden size {data.hidden_size}")
     grid_rows, grid_cols = -(-rows_in_image // args.patch_height), data.hidden_size // args.patch_width
@@ -96,7 +96,7 @@ def run(args, data, device):
                for name, ds in splits.items()}
 
     def image_of(states):
-        return pool_layers(states.float(), args.pooling, args.pool_kernel, args.pool_stride)
+        return pool_layers(states.float(), args.pooling, args.pool_kernel, args.pool_stride, args.pool_layers)
 
     total = torch.zeros(rows_in_image, data.hidden_size, dtype=torch.float64)
     total_sq = torch.zeros_like(total)

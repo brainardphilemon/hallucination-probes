@@ -26,7 +26,7 @@ def run(args, data, device):
 
     if args.pca_dim:
         raise SystemExit("--pca-dim is supported by --method mlp and sala")
-    layers = pooled_layer_count(data.n_layers, args.pooling, args.pool_kernel, args.pool_stride)
+    layers = pooled_layer_count(data.n_layers, args.pooling, args.pool_kernel, args.pool_stride, args.pool_layers)
     hidden = data.hidden_size
     seed_everything(args.seed)
     splits = {"train": StateDataset(data.sources, "train"), "val": StateDataset(data.sources, "val"),
@@ -39,7 +39,7 @@ def run(args, data, device):
                for name, ds in splits.items()}
 
     def pool(states):
-        return pool_layers(states.float(), args.pooling, args.pool_kernel, args.pool_stride)
+        return pool_layers(states.float(), args.pooling, args.pool_kernel, args.pool_stride, args.pool_layers)
 
     total = torch.zeros(layers, hidden, dtype=torch.float64)
     total_sq, total_xy = torch.zeros_like(total), torch.zeros_like(total)
