@@ -1,6 +1,7 @@
 # Running on Kaggle
 
-The repository is private, so the notebooks clone it using a Kaggle secret.
+The repository is currently public, so the notebooks clone it anonymously and no secret is needed. If you make it private
+again, the setup cell falls back to the `GITHUB_TOKEN` secret described below.
 
 ## One-time setup
 
