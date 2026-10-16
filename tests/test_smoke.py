@@ -89,3 +89,37 @@ def test_preset_rejects_overlap(artifacts, tmp_path):
     with pytest.raises(ValueError):
         main(["train", "--method", "mlp", "--artifact-dir", str(artifacts), "--output-dir", str(tmp_path),
               "--device", "cpu", "--sources", "tqa", "--targets", "tqa"])
+
+
+@pytest.mark.parametrize("extra", [["--pooling", "logsumexp", "--pca-dim", "8"], ["--pooling", "max"]])
+def test_predict_reproduces_training_scores(artifacts, tmp_path, extra):
+    import csv
+
+    from hprobes.predict import Detector
+
+    train(artifacts, tmp_path, "--method", "mlp", *extra)
+    detector = Detector.load(tmp_path / "run" / "model.pt")
+    with (tmp_path / "run" / "results.csv").open() as f:
+        expected = [float(r["sala_probability"]) for r in csv.DictReader(f)]
+    features = np.load(artifacts / "generation" / "triviaqa" / "features.npy")
+    out = detector.predict(features)
+    assert np.allclose(out["probability_correct"], expected, atol=1e-5)
+    assert detector.predict(features[0])["probability_correct"].shape == (1,)
+    with pytest.raises(ValueError):
+        detector.predict(features[:, :5])
+
+
+def test_predict_cli(artifacts, tmp_path):
+    train(artifacts, tmp_path, "--method", "mlp", "--pooling", "max")
+    records = tmp_path / "records.jsonl"
+    records.write_text("".join(json.dumps({"input": f"q{i}", "generated_output": f"a{i}",
+                                           "actual_output": f"a{i}"}) + "\n" for i in range(5)))
+    features = str(artifacts / "generation" / "triviaqa" / "features.npy")
+    main(["predict", "--model", str(tmp_path / "run" / "model.pt"), "--states", features,
+          "--output", str(tmp_path / "p.csv")])
+    assert (tmp_path / "p.csv").exists()
+    np.save(tmp_path / "five.npy", np.load(features)[:5])
+    main(["predict", "--model", str(tmp_path / "run" / "model.pt"), "--states", str(tmp_path / "five.npy"),
+          "--records", str(records), "--output", str(tmp_path / "p.jsonl")])
+    first = json.loads((tmp_path / "p.jsonl").read_text().splitlines()[0])
+    assert first["generated_output"] == "a0" and first["verdict"] in ("correct", "hallucinated")

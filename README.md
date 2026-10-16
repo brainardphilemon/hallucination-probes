@@ -82,6 +82,28 @@ balanced accuracy, method details) and `results.csv` (one row per target example
 skipped if `summary.json` already exists, unless you pass `--overwrite`. SALA saves each layer's
 projection under `sala_layers/`, so an interrupted run resumes where it stopped.
 
+## 3. Score new examples
+
+`hprobes train --method mlp` also writes `<output-dir>/model.pt` (pooling, fitted PCA, trained MLP and the
+calibrated threshold). Feed it hidden states plus the texts:
+
+```bash
+hprobes predict --model runs/mlp/model.pt --states states.npy --records records.jsonl --output preds.csv
+# add --bleurt to also score the generated output against the actual output and compare with the detector
+```
+
+* `states.npy`: last generated-answer-token hidden states of all 29 layers, shape `(N, 29, 3584)` or `(29, 3584)`,
+  from Qwen2.5-7B-Instruct (same layers and chat prompt as `hprobes extract`).
+* `records.jsonl` (optional, same order): `{"input": ..., "generated_output": ..., "actual_output": ...}`;
+  `actual_output` may be a list of acceptable answers.
+* The detector itself reads only the hidden states; the texts are reported and used for the BLEURT check.
+
+```python
+from hprobes.predict import Detector
+out = Detector.load("runs/mlp/model.pt").predict(states)
+out["probability_correct"], out["hallucinated"]   # label 1 = correct, 0 = hallucinated
+```
+
 ## LLM-judge baselines
 
 ```bash

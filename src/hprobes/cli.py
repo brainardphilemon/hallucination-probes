@@ -1,4 +1,4 @@
-"""Command line: ``hprobes extract | train | judge``.
+"""Command line: ``hprobes extract | train | predict | judge``.
 
 Examples::
 
@@ -56,6 +56,8 @@ def add_train_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--device", default="cuda:0")
     g.add_argument("--num-workers", type=int, default=2)
     g.add_argument("--overwrite", action="store_true", help="Re-run even if summary.json already exists")
+    g.add_argument("--no-save-model", action="store_true",
+                   help="Do not write <output-dir>/model.pt (method mlp only; used by `hprobes predict`)")
 
     g = p.add_argument_group("features")
     g.add_argument("--pooling", choices=POOLING, default="none", help="Pool hidden states across layers")
@@ -159,7 +161,14 @@ def train(args) -> dict:
           f"layers={data.n_layers} hidden={data.hidden_size} device={device}", flush=True)
     method = importlib.import_module(f"hprobes.methods.{args.method}")
     method_summary, val_logits, test_logits, target_logits = method.run(args, data, device)
-    return save_results(args, data, method_summary, val_logits, test_logits, target_logits)
+    summary = save_results(args, data, method_summary, val_logits, test_logits, target_logits)
+    exported = getattr(method, "LAST_MODEL", None)
+    if exported and not args.no_save_model:
+        from hprobes.predict import save_bundle
+
+        save_bundle(output_dir / "model.pt", exported, summary)
+        print(f"Saved inference bundle to {output_dir / 'model.pt'}", flush=True)
+    return summary
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -170,6 +179,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     extract.build_parser(sub.add_parser("extract", help="Generate answers, hidden states and BLEURT labels"))
     add_train_args(sub.add_parser("train", help="Train and evaluate a detector",
                                   formatter_class=argparse.ArgumentDefaultsHelpFormatter))
+    from hprobes import predict as predict_module
+
+    predict_module.build_parser(sub.add_parser("predict", help="Score new examples with a trained model.pt"))
     judge = sub.add_parser("judge", help="LLM-judge baselines over saved answers (Jev, LAYA)")
     judge.add_argument("judge", choices=("jev", "laya"))
     judge.add_argument("judge_args", nargs=argparse.REMAINDER, help="Arguments passed to the judge script")
@@ -178,6 +190,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         extract.run(args)
     elif args.command == "train":
         train(args)
+    elif args.command == "predict":
+        predict_module.run(args)
     else:
         from hprobes.judges import jev, laya
 

@@ -100,6 +100,16 @@ class LayerPCA:
         return torch.stack([((self._block(x, g).to(device) - m) @ b).cpu()
                             for g, m, b in zip(self._groups(x), self.means, self.bases)], dim=1)
 
+    def state(self) -> dict:
+        return {"dim": self.dim, "scope": self.scope, "seed": self.seed,
+                "means": [m.cpu() for m in self.means], "bases": [b.cpu() for b in self.bases]}
+
+    @classmethod
+    def from_state(cls, state: dict) -> "LayerPCA":
+        pca = cls(state["dim"], state["scope"], state["seed"])
+        pca.means, pca.bases = list(state["means"]), list(state["bases"])
+        return pca
+
     def summary(self) -> dict:
         return {"dim": self.dim, "scope": self.scope, "groups": len(self.bases),
                 "mean_explained_variance": float(np.mean(self.explained)) if self.explained else None}

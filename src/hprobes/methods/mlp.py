@@ -10,6 +10,9 @@ from hprobes.losses import make_loss
 from hprobes.training import fit, predict, residual_mlp, seed_everything, tensor_loader
 
 
+LAST_MODEL: dict = {}  # filled by run(); cli.train() writes it to <output-dir>/model.pt
+
+
 def run(args, data, device):
     pooled = pooled_layer_count(data.n_layers, args.pooling, args.pool_kernel, args.pool_stride)
     seed_everything(args.seed)
@@ -54,6 +57,15 @@ def run(args, data, device):
     best_auc, best_epoch, history = fit(model, loaders["train"], loaders["val"], data.labels("val"), step,
                                         make_loss(args, data.labels("train")), args, device)
     logits = {name: predict(model, loader, step, device, args) for name, loader in loaders.items()}
+    LAST_MODEL.clear()
+    LAST_MODEL.update({
+        "pooling": args.pooling, "pool_kernel": args.pool_kernel, "pool_stride": args.pool_stride,
+        "n_layers": data.n_layers, "hidden_size": data.hidden_size,
+        "pca": pca.state() if pca else None,
+        "head": {"input_dim": input_dim, "hidden_dim": args.hidden_dim, "hidden_layers": args.hidden_layers,
+                 "dropout": args.dropout},
+        "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
+    })
     summary = {"pooled_layers": pooled, "mlp_input_dimension": input_dim,
                "pca": pca.summary() if pca else None,
                "parameters": sum(p.numel() for p in model.parameters()),
