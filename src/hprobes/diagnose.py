@@ -4,7 +4,8 @@ Runs the same steps as ``Detector.logits`` (pooling -> PCA -> MLP) but keeps the
 see where an input stops looking like the training data:
   * shapes and the pooling windows actually used,
   * hidden-state norms per layer (raw and pooled),
-  * PCA coordinates compared with a reference set (z-scores against the reference's per-coordinate mean / std),
+  * the MLP's input features (PCA coordinates, or the pooled states themselves for a detector without PCA)
+    compared with a reference set (z-scores against the reference's per-feature mean / std),
   * raw logits and probabilities,
   * a consistency check that these stages reproduce ``Detector.logits`` exactly.
 """
@@ -27,19 +28,19 @@ def stages(detector, states, llm: str | None = None) -> dict[str, Any]:
     b = detector.bundle
     name = detector.resolve(tuple(x.shape[1:]), llm, any_layers=True)
     _, _, pca = detector.llms[name]
-    if pca is None or pca.scope != "per-layer":
-        raise ValueError("diagnose supports detectors with a stored per-layer PCA")
-    out_layers = len(pca.bases)
+    if pca is not None and pca.scope != "per-layer":
+        raise ValueError("diagnose supports detectors without PCA or with a per-layer PCA")
+    out_layers = len(pca.bases) if pca is not None else b["head"]["input_dim"] // x.shape[2]
     with torch.inference_mode():
         pooled = pool_layers(x.to(detector.device), b["pooling"], b["pool_kernel"], b["pool_stride"], out_layers).cpu()
-        z = pca.transform(pooled, detector.device)
+        z = pca.transform(pooled, detector.device) if pca is not None else pooled  # what the MLP reads
         logits = detector.model(z.flatten(1).to(detector.device)).float().cpu().numpy()
     return {
         "llm": name, "input_shape": tuple(x.shape), "pooled_shape": tuple(pooled.shape),
         "windows": adaptive_windows(x.shape[1], out_layers).tolist(),
         "raw_norm": x.norm(dim=2).median(0).values.numpy(),          # (layers,)
         "pooled_norm": pooled.norm(dim=2).median(0).values.numpy(),   # (pooled layers,)
-        "pca": z.numpy(),                                             # (n, pooled layers, dim)
+        "pca": z.numpy(),                                 # MLP input: (n, pooled layers, PCA dim or hidden)
         "logits": logits,
         "matches_detector": float(np.abs(logits - detector.logits(states, llm=llm, any_layers=True)).max()),
     }
@@ -64,7 +65,7 @@ def report(model_path, inputs: dict[str, Any], reference: str, device: str = "cp
         print(f"  input {r['input_shape']} -> pooled {r['pooled_shape']}; first windows {r['windows'][:3]}, last {r['windows'][-1]}")
         print("  median raw norm at layers " + ", ".join(f"{i}: {r['raw_norm'][i]:.1f}" for i in picks))
         print("  median pooled norm first/mid/last: " + ", ".join(f"{v:.1f}" for v in r["pooled_norm"][[0, len(r['pooled_norm']) // 2, -1]]))
-        print(f"  PCA coords vs '{reference}': median |z| = {np.median(np.abs(z)):.2f}, 99th pct |z| = {np.percentile(np.abs(z), 99):.1f}, "
+        print(f"  MLP input features vs '{reference}': median |z| = {np.median(np.abs(z)):.2f}, 99th pct |z| = {np.percentile(np.abs(z), 99):.1f}, "
               f"max |z| = {np.abs(z).max():.1f}")
         print(f"  raw logit min / median / max = {r['logits'].min():.2f} / {np.median(r['logits']):.2f} / {r['logits'].max():.2f}; "
               f"P(correct) median = {np.median(prob):.4f}; predicted correct = {int((prob >= threshold).sum())}/{len(prob)}")

@@ -376,3 +376,33 @@ def test_answer_end_tokens_are_stripped():
     assert 107 in stops and 3 not in stops
     assert strip_trailing([50, 51, 52, 107, 1], set(stops)) == [50, 51, 52]
     assert strip_trailing([50, 107, 0, 0], set(stops)) == [50]
+
+
+def test_import_legacy_without_pca_is_exact_and_diagnosable(artifacts, tmp_path):
+    """Old no-PCA runs (e.g. sala-g14-logsumexp-4x128) load exactly; diagnose works without a PCA."""
+    import torch
+
+    from hprobes.diagnose import report
+    from hprobes.legacy import rebuild
+
+    summary = train(artifacts, tmp_path, "--method", "mlp", "--pooling", "logsumexp")
+    run = tmp_path / "run"
+    bundle = torch.load(run / "model.pt", weights_only=False)
+    old = tmp_path / "old"
+    old.mkdir()
+    torch.save({"input_dim": bundle["head"]["input_dim"], "hidden_dim": bundle["head"]["hidden_dim"],
+                "hidden_layers": bundle["head"]["hidden_layers"], "pooling": "logsumexp1d",
+                "model": bundle["state_dict"]}, old / "best_mlp.pt")
+    (old / "results.csv").write_text((run / "results.csv").read_text())
+    (old / "summary.json").write_text(json.dumps({  # no feature_pca_dim key, like the real older runs
+        "pooling_method": "logsumexp1d", "pool_kernel_size": 3, "pool_stride": 2, "seed": 42,
+        "source_domains": ["tqa", "sciq", "popqa"], "target_domain": "triviaqa",
+        "num_layers_including_embedding_output": LAYERS, "hidden_size": HIDDEN, "bleurt_threshold": 0.5,
+        "sala_threshold": summary["threshold"], "label_definition": summary["label_definition"],
+        "target_metrics": summary["target_metrics"]["triviaqa"]}))
+    out = rebuild(old, artifacts, tmp_path / "nopca.pt", "cpu")
+    assert out["max_abs_probability_diff"] < 1e-5
+    features = np.load(artifacts / "generation" / "triviaqa" / "features.npy")
+    deeper = np.random.default_rng(0).normal(size=(4, 15, HIDDEN)).astype(np.float16)
+    results = report(tmp_path / "nopca.pt", {"ref": features, "deeper": deeper}, reference="ref")
+    assert results["deeper"]["pca"].shape == (4, 5, HIDDEN) and results["deeper"]["matches_detector"] < 1e-4
