@@ -320,9 +320,9 @@ def test_generate_handles_templates_without_system_role_and_multiple_stop_tokens
         vocab_size=64, hidden_size=16, intermediate_size=32, num_hidden_layers=3, num_attention_heads=2,
         num_key_value_heads=2, eos_token_id=[1, 7])).eval()
     assert stop_token_ids(Tok(), model) == [1, 7]
-    states, answers = generate_with(model, Tok(), [{"input_text": "hello"}, {"input_text": "hi"}], "cpu", "sys",
-                                    max_new_tokens=4, log_every=0)
-    assert states.shape == (2, 4, 16) and len(answers) == 2
+    states, answers, last_tokens = generate_with(model, Tok(), [{"input_text": "hello"}, {"input_text": "hi"}], "cpu",
+                                                 "sys", max_new_tokens=4, log_every=0)
+    assert states.shape == (2, 4, 16) and len(answers) == 2 and len(last_tokens) == 2
 
 
 @pytest.mark.parametrize("device", ["mps", "cuda"])
@@ -342,3 +342,15 @@ def test_loaded_bundle_runs_on_gpu(artifacts, tmp_path, device):
     gpu_detector.model.to(device)
     gpu = gpu_detector.predict(features, any_layers=True)["probability_correct"]
     assert np.allclose(cpu, gpu, atol=1e-3)
+
+
+def test_diagnose_report_matches_detector(artifacts, tmp_path, capsys):
+    from hprobes.diagnose import report
+
+    train(artifacts, tmp_path, "--method", "mlp", "--pooling", "logsumexp", "--pca-dim", "8")
+    features = np.load(artifacts / "generation" / "triviaqa" / "features.npy")
+    other = (np.random.default_rng(0).normal(size=(6, 17, HIDDEN)) * 50).astype(np.float16)  # other depth, bigger scale
+    results = report(tmp_path / "run" / "model.pt", {"ref": features, "other": other}, reference="ref")
+    out = capsys.readouterr().out
+    assert "stages reproduce Detector.logits" in out and results["other"]["pooled_shape"] == (6, 5, HIDDEN)
+    assert all(r["matches_detector"] < 1e-4 for r in results.values())

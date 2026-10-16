@@ -42,13 +42,13 @@ def stop_token_ids(tokenizer, model) -> list[int]:
 
 def generate_with(model, tokenizer, records: Sequence[dict[str, Any]], device: str, system_prompt: str,
                   max_input_tokens: int = 512, max_new_tokens: int = 32, log_every: int = 1):
-    """-> (states (N, layers + 1, hidden) float16, generated answer texts)."""
+    """-> (states (N, layers + 1, hidden) float16, answer texts, the token each hidden state was taken from)."""
     import torch
 
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
     stops = stop_token_ids(tokenizer, model)
-    states, answers = [], []
+    states, answers, last_tokens = [], [], []
     with torch.inference_mode():
         for i, record in enumerate(records):
             prompt = build_prompt(tokenizer, record["input_text"], system_prompt)
@@ -67,9 +67,10 @@ def generate_with(model, tokenizer, records: Sequence[dict[str, Any]], device: s
                            use_cache=False, return_dict=True)
             states.append(stack_last_token_features(replay.hidden_states, torch).numpy().astype(np.float16))
             answers.append(tokenizer.decode(answer_ids, skip_special_tokens=True).strip())
+            last_tokens.append(tokenizer.decode(replay_ids[0, -1:], skip_special_tokens=False))
             if log_every and (i + 1) % log_every == 0:
                 print(f"generate {i + 1}/{len(records)}: {record['input_text'][:60]!r} -> {answers[-1]!r}", flush=True)
-    return np.stack(states), answers
+    return np.stack(states), answers, last_tokens
 
 
 def load_model(args):
@@ -115,8 +116,8 @@ def run(args) -> np.ndarray:
     records = records[:args.limit] if args.limit else records
     model, tokenizer = load_model(args)
     try:
-        states, answers = generate_with(model, tokenizer, records, args.device, args.system_prompt,
-                                        args.max_input_tokens, args.max_new_tokens)
+        states, answers, last_tokens = generate_with(model, tokenizer, records, args.device, args.system_prompt,
+                                                     args.max_input_tokens, args.max_new_tokens)
     finally:
         del model, tokenizer
         import torch
@@ -125,9 +126,9 @@ def run(args) -> np.ndarray:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     np.save(args.output_dir / "states.npy", states)
     with (args.output_dir / "records.jsonl").open("w", encoding="utf-8") as stream:
-        for record, answer in zip(records, answers):
+        for record, answer, last_token in zip(records, answers, last_tokens):
             stream.write(json.dumps({"id": record.get("id"), "input": record["input_text"],
-                                     "generated_output": answer,
+                                     "generated_output": answer, "last_token": last_token,
                                      "actual_output": record.get("ground_truth_answers")}, ensure_ascii=False) + "\n")
     print(f"Saved states {states.shape} and records to {args.output_dir}", flush=True)
     return states
