@@ -4,11 +4,11 @@ The repository is private, so the notebooks clone it using a Kaggle secret.
 
 ## One-time setup
 
-1. On GitHub, open Settings → Developer settings → Fine-grained tokens and create a token.
-   Give it **read-only "Contents" access to `brainardphilemon/hallucination-probes` only**.
-2. In a Kaggle notebook, open Add-ons → Secrets → Add secret.
-   Name it `GITHUB_TOKEN`, paste the token, and enable it for the notebook.
-   You need to enable it again for every new notebook, including copies.
+1. On GitHub, open Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens -> Generate new token.
+   Set **Resource owner** to `brainardphilemon`, choose **Only select repositories** -> `hallucination-probes`, and under
+   Repository permissions set **Contents: Read-only** (Metadata read is added automatically). Pick an expiry.
+2. In a Kaggle notebook, open Add-ons -> Secrets -> Add secret. Name it `GITHUB_TOKEN`, paste the token, and tick the
+   checkbox that attaches it to the notebook. You need to attach it again for every new notebook, including copies.
 3. Settings: Accelerator **GPU T4 x2**, Internet **on**.
 
 ## Extract (`notebooks/kaggle_extract.ipynb`)
@@ -29,3 +29,12 @@ The full 7-dataset extraction takes several hours. Runs resume, so a timed-out r
 The last cell prints a table comparing all runs. The per-run files are in `/kaggle/working/runs/<name>/`.
 
 For reproducible runs, set `REF` in the first cell to a commit hash instead of `main`.
+
+## Troubleshooting
+
+* `git clone failed; GitHub API answered 401`: the token is invalid, expired or was revoked. Create a new one.
+* `... answered 404`: the token cannot see the private repository. Most often it was created for a different repository
+  or owner, or without Contents: Read-only.
+* `Secret not found` / `No secrets`: the secret is not named exactly `GITHUB_TOKEN` or is not attached to this notebook.
+* The setup cell passes the token to git only through an environment header, so it never appears in the command, URL,
+  traceback or notebook log. If you ever see a token in a log, revoke it at once.
