@@ -24,15 +24,17 @@ class Domain:
     labels: np.ndarray
     features: np.ndarray  # memory-mapped (rows, layers, hidden), float16
     split: dict[str, np.ndarray] = field(default_factory=dict)
+    model: str = "default"  # which LLM produced the hidden states
 
 
 @dataclass
 class ExperimentData:
-    artifact_dir: Path
+    artifact_dir: Any  # a Path, or {llm name: Path} when several LLMs are used
     sources: list[Domain]
     targets: list[Domain]
     n_layers: int
     hidden_size: int
+    models: dict[str, tuple[int, int]] = field(default_factory=dict)  # llm name -> (layers, hidden size)
 
     def entries(self, split: str) -> list[tuple[int, int, int]]:
         """(source index, row id, label) for a source split: train / val / test."""
@@ -72,34 +74,56 @@ def source_split_indices(labels: np.ndarray, domain: str):
     return trainval_idx[train_pos], trainval_idx[val_pos], test_idx
 
 
-def load_experiment(artifact_dir: Path, sources: Sequence[str], targets: Sequence[str],
+def parse_spec(spec: str, artifacts: dict[str, Path]) -> tuple[str, str]:
+    """'tqa' (one LLM) or 'llama:tqa' (several LLMs) -> (llm name, dataset name)."""
+    from hprobes.domains import DOMAINS
+
+    model, _, name = spec.rpartition(":")
+    if not model:
+        if len(artifacts) != 1:
+            raise ValueError(f"With several LLMs write datasets as <llm>:<dataset> (got {spec!r}); "
+                             f"LLMs: {sorted(artifacts)}")
+        model = next(iter(artifacts))
+    if model not in artifacts:
+        raise ValueError(f"Unknown LLM {model!r} in {spec!r}; LLMs: {sorted(artifacts)}")
+    if name not in DOMAINS:
+        raise ValueError(f"Unknown dataset {name!r} in {spec!r}; datasets: {list(DOMAINS)}")
+    return model, name
+
+
+def load_experiment(artifact_dir, sources: Sequence[str], targets: Sequence[str],
                     bleurt_threshold: float = 0.5) -> ExperimentData:
-    artifact_dir = Path(artifact_dir).expanduser().resolve()
+    """artifact_dir: one folder (a single LLM) or {llm name: folder}; with several LLMs name datasets <llm>:<dataset>."""
+    artifacts = ({str(k): Path(v).expanduser().resolve() for k, v in artifact_dir.items()}
+                 if isinstance(artifact_dir, dict) else {"default": Path(artifact_dir).expanduser().resolve()})
+    multi = len(artifacts) > 1
     overlap = set(sources) & set(targets)
     if overlap:
         raise ValueError(f"Datasets cannot be both source and target: {sorted(overlap)}")
     if not sources or not targets:
         raise ValueError("Need at least one source and one target dataset")
     loaded: dict[str, Domain] = {}
-    shape = None
-    for name in [*sources, *targets]:
-        rows, labels, bleurt = load_labels(artifact_dir, name, bleurt_threshold)
-        features = np.load(artifact_dir / "generation" / name / "features.npy", mmap_mode="r")
+    shapes: dict[str, tuple[int, int]] = {}
+    for spec in [*sources, *targets]:
+        model, dataset = parse_spec(spec, artifacts)
+        rows, labels, bleurt = load_labels(artifacts[model], dataset, bleurt_threshold)
+        features = np.load(artifacts[model] / "generation" / dataset / "features.npy", mmap_mode="r")
         if len(features) != len(rows):
-            raise ValueError(f"{name}: {len(features)} feature rows but {len(rows)} answers")
-        if shape is not None and features.shape[1:] != shape:
-            raise ValueError(f"{name}: feature shape {features.shape[1:]} differs from {shape}")
-        shape = features.shape[1:]
-        domain = Domain(name, rows, labels, features)
+            raise ValueError(f"{spec}: {len(features)} feature rows but {len(rows)} answers")
+        shape = (int(features.shape[1]), int(features.shape[2]))
+        if shapes.setdefault(model, shape) != shape:
+            raise ValueError(f"{spec}: feature shape {shape} differs from {shapes[model]} of {model}")
+        domain = Domain(spec if multi else dataset, rows, labels, features, model=model)
         domain.bleurt = bleurt
-        loaded[name] = domain
-    for name in sources:
-        train, val, test = source_split_indices(loaded[name].labels, name)
-        loaded[name].split = {"train": train, "val": val, "test": test}
-    for name in targets:
-        loaded[name].split = {"all": np.arange(len(loaded[name].labels))}
-    data = ExperimentData(artifact_dir, [loaded[n] for n in sources], [loaded[n] for n in targets],
-                          int(shape[0]), int(shape[1]))
+        loaded[spec] = domain
+    for spec in sources:
+        train, val, test = source_split_indices(loaded[spec].labels, loaded[spec].name)
+        loaded[spec].split = {"train": train, "val": val, "test": test}
+    for spec in targets:
+        loaded[spec].split = {"all": np.arange(len(loaded[spec].labels))}
+    first = next(iter(shapes.values()))
+    data = ExperimentData(artifact_dir if multi else next(iter(artifacts.values())),
+                          [loaded[n] for n in sources], [loaded[n] for n in targets], first[0], first[1], shapes)
     if len(np.unique(data.labels("train"))) != 2 or len(np.unique(data.labels("val"))) != 2:
         raise ValueError("Source train and validation splits must contain both BLEURT classes")
     return data

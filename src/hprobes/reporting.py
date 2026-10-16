@@ -46,6 +46,7 @@ def save_results(args, data, method_summary: dict[str, Any], val_logits: np.ndar
         "targets": [d.name for d in data.targets],
         "num_layers_including_embedding_output": data.n_layers,
         "hidden_size": data.hidden_size,
+        "llm_shapes": {name: list(shape) for name, shape in data.models.items()},
         "label_definition": "1 = BLEURT-correct/non-hallucinated (score >= threshold); 0 = otherwise",
         "bleurt_threshold": args.bleurt_threshold,
         "config": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},

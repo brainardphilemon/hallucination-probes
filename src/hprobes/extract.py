@@ -28,6 +28,7 @@ from hprobes.io import prepare_manifest, read_jsonl, sha256_json
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 DEFAULT_MODEL_REVISION = "a09a35458c702b33eeacc393d103063234e8bc28"
+DEFAULT_SYSTEM_PROMPT = "Answer the question with only a short factual answer. Do not explain your answer."
 DEFAULT_BLEURT_MODEL = "lucadiliello/BLEURT-20"
 DEFAULT_BLEURT_REVISION = "e22b9eb071dcb939da9fff08b20a7e746c72a830"
 
@@ -409,9 +410,7 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--max-input-tokens", type=int, default=512)
-    parser.add_argument("--system-prompt", default=(
-        "Answer the question with only a short factual answer. Do not explain your answer."
-    ))
+    parser.add_argument("--system-prompt", default=DEFAULT_SYSTEM_PROMPT)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--bleurt-device", default="cuda:0")
     parser.add_argument("--bleurt-batch-size", type=int, default=16)

@@ -1,4 +1,4 @@
-"""Command line: ``hprobes extract | train | predict | judge``.
+"""Command line: ``hprobes extract | train | predict | embed | import-legacy | judge``.
 
 Examples::
 
@@ -46,10 +46,12 @@ METHOD_DEFAULTS = {
 def add_train_args(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("data")
     g.add_argument("--method", choices=METHODS, required=True)
-    g.add_argument("--artifact-dir", type=Path, required=True, help="Output of `hprobes extract`")
+    g.add_argument("--artifact-dir", nargs="+", required=True,
+                   help="Output of `hprobes extract`; for several LLMs give <llm>=<dir> pairs and name datasets "
+                        "<llm>:<dataset> (method mlp with --pca-dim)")
     g.add_argument("--output-dir", type=Path, required=True)
-    g.add_argument("--sources", nargs="+", choices=DOMAINS, help="Training datasets")
-    g.add_argument("--targets", nargs="+", choices=DOMAINS, help="Held-out test datasets (never trained on)")
+    g.add_argument("--sources", nargs="+", help=f"Training datasets: {', '.join(DOMAINS)}")
+    g.add_argument("--targets", nargs="+", help="Held-out test datasets (never trained on)")
     g.add_argument("--preset", choices=sorted(PRESETS), help="Named sources/targets (overridden by --sources/--targets)")
     g.add_argument("--bleurt-threshold", type=float, default=0.5, help="BLEURT >= threshold counts as correct")
     g.add_argument("--seed", type=int, default=42)
@@ -143,6 +145,15 @@ def resolve_train_args(args) -> argparse.Namespace:
     return args
 
 
+def parse_artifacts(values):
+    """One folder, or <llm>=<folder> pairs for several LLMs."""
+    if len(values) == 1 and "=" not in values[0]:
+        return Path(values[0])
+    if any("=" not in v for v in values):
+        raise SystemExit("With several --artifact-dir values write each as <llm>=<folder>")
+    return {name: Path(path) for name, path in (v.split("=", 1) for v in values)}
+
+
 def train(args) -> dict:
     import importlib
 
@@ -157,10 +168,12 @@ def train(args) -> dict:
         print(f"{output_dir / 'summary.json'} exists; pass --overwrite to re-run", flush=True)
         return json.loads((output_dir / "summary.json").read_text())
     output_dir.mkdir(parents=True, exist_ok=True)
-    data = load_experiment(args.artifact_dir, args.sources, args.targets, args.bleurt_threshold)
+    data = load_experiment(parse_artifacts(args.artifact_dir), args.sources, args.targets, args.bleurt_threshold)
+    if len(data.models) > 1 and args.method != "mlp":
+        raise SystemExit("Training on several LLMs is implemented for --method mlp")
     device = get_device(args.device)
     print(f"{args.method}: sources={args.sources} targets={args.targets} "
-          f"layers={data.n_layers} hidden={data.hidden_size} device={device}", flush=True)
+          f"LLM shapes={dict(data.models)} device={device}", flush=True)
     method = importlib.import_module(f"hprobes.methods.{args.method}")
     method_summary, val_logits, test_logits, target_logits = method.run(args, data, device)
     summary = save_results(args, data, method_summary, val_logits, test_logits, target_logits)
@@ -184,9 +197,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     from hprobes import predict as predict_module
 
     predict_module.build_parser(sub.add_parser("predict", help="Score new examples with a trained model.pt"))
+    from hprobes import embed as embed_module
     from hprobes import legacy
 
     legacy.build_parser(sub.add_parser("import-legacy", help="Turn an old sala_raw_concat.py run into a model.pt"))
+    embed_module.build_parser(sub.add_parser("embed", help="Qwen hidden states for (input, answer) text from any generator"))
     judge = sub.add_parser("judge", help="LLM-judge baselines over saved answers (Jev, LAYA)")
     judge.add_argument("judge", choices=("jev", "laya"))
     judge.add_argument("judge_args", nargs=argparse.REMAINDER, help="Arguments passed to the judge script")
@@ -197,6 +212,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         train(args)
     elif args.command == "predict":
         predict_module.run(args)
+    elif args.command == "embed":
+        embed_module.run(args)
     elif args.command == "import-legacy":
         legacy.rebuild(args.run_dir, args.artifact_dir, args.output, args.device)
     else:

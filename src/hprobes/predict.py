@@ -53,7 +53,11 @@ def save_bundle(path: Path, exported: dict, summary: dict) -> None:
 
 
 class Detector:
-    """Pooling -> optional PCA -> residual MLP -> probability that the answer is correct."""
+    """Pooling -> per-LLM PCA -> shared residual MLP -> probability that the answer is correct.
+
+    A bundle trained on several LLMs holds one PCA per LLM; ``predict`` picks the PCA whose
+    (layers, hidden size) matches the input, or the one named by ``llm=``.
+    """
 
     def __init__(self, bundle: dict, device: str = "cpu"):
         import torch
@@ -66,8 +70,10 @@ class Detector:
         self.bundle = bundle
         self.device = torch.device(device if device != "cuda" or torch.cuda.is_available() else "cpu")
         self.threshold = float(bundle["threshold"])
-        self.n_layers, self.hidden_size = int(bundle["n_layers"]), int(bundle["hidden_size"])
-        self.pca = LayerPCA.from_state(bundle["pca"]) if bundle["pca"] else None
+        models = bundle.get("models") or {"default": {"n_layers": bundle["n_layers"], "hidden_size": bundle["hidden_size"],
+                                                      "pca": bundle["pca"]}}
+        self.llms = {name: (int(m["n_layers"]), int(m["hidden_size"]),
+                            LayerPCA.from_state(m["pca"]) if m["pca"] else None) for name, m in models.items()}
         head = bundle["head"]
         self.model = residual_mlp(head["input_dim"], head["hidden_dim"], head["hidden_layers"], head["dropout"])
         self.model.load_state_dict(bundle["state_dict"])
@@ -79,7 +85,24 @@ class Detector:
 
         return cls(torch.load(Path(path), map_location="cpu", weights_only=False), device)
 
-    def logits(self, states, batch_size: int = 256) -> np.ndarray:
+    def resolve(self, shape: tuple[int, int], llm: str | None = None) -> str:
+        if llm is not None:
+            if llm not in self.llms:
+                raise ValueError(f"Unknown LLM {llm!r}; this detector knows {sorted(self.llms)}")
+            if self.llms[llm][:2] != tuple(shape):
+                raise ValueError(f"{llm!r} expects hidden states of shape (N, {self.llms[llm][0]}, "
+                                 f"{self.llms[llm][1]}); got (N, {shape[0]}, {shape[1]})")
+            return llm
+        matches = [name for name, (layers, hidden, _) in self.llms.items() if (layers, hidden) == tuple(shape)]
+        if len(matches) == 1:
+            return matches[0]
+        known = {name: f"({layers}, {hidden})" for name, (layers, hidden, _) in self.llms.items()}
+        if not matches:
+            raise ValueError(f"No LLM in this detector has hidden states of shape (layers, hidden) = {tuple(shape)}; "
+                             f"it knows {known}")
+        raise ValueError(f"Several LLMs share shape {tuple(shape)} ({matches}); pass llm=<name>")
+
+    def logits(self, states, batch_size: int = 256, llm: str | None = None) -> np.ndarray:
         import torch
 
         from hprobes.features import pool_layers
@@ -87,22 +110,23 @@ class Detector:
         x = torch.as_tensor(np.asarray(states))
         if x.ndim == 2:
             x = x.unsqueeze(0)
-        if x.ndim != 3 or tuple(x.shape[1:]) != (self.n_layers, self.hidden_size):
-            raise ValueError(f"Expected hidden states of shape (N, {self.n_layers}, {self.hidden_size}) or "
-                             f"({self.n_layers}, {self.hidden_size}); got {tuple(x.shape)}")
+        if x.ndim != 3:
+            raise ValueError(f"Expected hidden states of shape (N, layers, hidden) or (layers, hidden); "
+                             f"got {tuple(x.shape)}")
+        pca = self.llms[self.resolve(tuple(x.shape[1:]), llm)][2]
         b = self.bundle
         out = []
         with torch.inference_mode():
             for start in range(0, len(x), batch_size):
                 block = x[start:start + batch_size].to(self.device).float()
                 block = pool_layers(block, b["pooling"], b["pool_kernel"], b["pool_stride"], b.get("pool_layers", 0))
-                features = self.pca.transform(block, self.device).flatten(1).to(self.device) if self.pca \
+                features = pca.transform(block, self.device).flatten(1).to(self.device) if pca \
                     else block.flatten(1)
                 out.append(self.model(features).float().cpu())
         return torch.cat(out).numpy()
 
-    def predict(self, states, batch_size: int = 256) -> dict[str, np.ndarray]:
-        logits = self.logits(states, batch_size)
+    def predict(self, states, batch_size: int = 256, llm: str | None = None) -> dict[str, np.ndarray]:
+        logits = self.logits(states, batch_size, llm)
         probability = 1.0 / (1.0 + np.exp(-np.clip(logits, -80.0, 80.0)))
         correct = probability >= self.threshold
         return {"raw_logit": logits, "probability_correct": probability,
@@ -202,6 +226,7 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument("--bleurt-model", default=DEFAULT_BLEURT_MODEL)
     parser.add_argument("--bleurt-revision", default=DEFAULT_BLEURT_REVISION)
     parser.add_argument("--bleurt-batch-size", type=int, default=16)
+    parser.add_argument("--llm", help="Which LLM's PCA to use; default: the one matching the shape of --states")
     parser.add_argument("--threshold", type=float, help="Override the saved decision threshold on P(correct)")
     parser.add_argument("--device", default="cpu", help="cpu or cuda")
     return parser
@@ -214,7 +239,7 @@ def run(args) -> list[dict[str, Any]]:
     states = load_states(args.states)
     if np.ndim(states) == 2:
         states = np.asarray(states)[None]
-    prediction = detector.predict(states)
+    prediction = detector.predict(states, llm=args.llm)
     count = len(prediction["raw_logit"])
     records = read_records(args.records) if args.records else [{} for _ in range(count)]
     if len(records) != count:

@@ -15,10 +15,10 @@ from hprobes.features import pool_layers, pooled_layer_count
 LAYERS, HIDDEN, ROWS = 9, 32, 120
 
 
-def write_domain(root: Path, name: str, seed: int, shift: float) -> None:
+def write_domain(root: Path, name: str, seed: int, shift: float, layers: int = LAYERS, hidden: int = HIDDEN) -> None:
     rng = np.random.default_rng(seed)
     labels = rng.integers(0, 2, ROWS)
-    features = rng.normal(shift, 1.0, (ROWS, LAYERS, HIDDEN)).astype(np.float16)
+    features = rng.normal(shift, 1.0, (ROWS, layers, hidden)).astype(np.float16)
     features[:, :, :4] += (2 * labels[:, None, None] - 1).astype(np.float16)
     gen, bleurt = root / "generation" / name, root / "bleurt" / name
     gen.mkdir(parents=True)
@@ -173,3 +173,56 @@ def test_pool_layers_option_end_to_end(artifacts, tmp_path):
     summary = train(artifacts, tmp_path, "--method", "mlp", "--pooling", "logsumexp", "--pool-layers", "5",
                     "--pca-dim", "8")
     assert summary["mlp_input_dimension"] == 5 * 8
+
+
+def test_train_on_several_llms_and_autodetect_shape(tmp_path):
+    from hprobes.predict import Detector
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    for name, seed in (("tqa", 1), ("sciq", 2), ("triviaqa", 3)):
+        write_domain(a, name, seed, 0.0, 9, 32)
+    for name, seed in (("tqa", 4), ("popqa", 5), ("triviaqa", 6)):
+        write_domain(b, name, seed, 0.2, 12, 48)
+    out = tmp_path / "multi"
+    main(["train", "--method", "mlp", "--artifact-dir", f"qwen={a}", f"llama={b}", "--output-dir", str(out),
+          "--device", "cpu", "--sources", "qwen:tqa", "qwen:sciq", "llama:tqa", "llama:popqa",
+          "--targets", "qwen:triviaqa", "llama:triviaqa", "--epochs", "2", "--num-workers", "0",
+          "--pooling", "logsumexp", "--pool-layers", "5", "--pca-dim", "8"])
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["mlp_input_dimension"] == 5 * 8 and set(summary["target_metrics"]) == {"qwen:triviaqa", "llama:triviaqa"}
+    detector = Detector.load(out / "model.pt")
+    qwen_states, llama_states = (np.load(d / "generation" / "triviaqa" / "features.npy") for d in (a, b))
+    assert detector.predict(qwen_states)["probability_correct"].shape == (ROWS,)
+    assert detector.predict(llama_states)["probability_correct"].shape == (ROWS,)
+    with pytest.raises(ValueError, match="No LLM"):
+        detector.predict(np.zeros((2, 7, 32), dtype=np.float16))
+    with pytest.raises(ValueError, match="expects"):
+        detector.predict(llama_states, llm="qwen")
+
+
+def test_embed_replays_prompt_plus_answer():
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from hprobes.embed import embed_with
+
+    class Tok:
+        eos_token_id = pad_token_id = 0
+
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+            return "S:" + messages[0]["content"] + "U:" + messages[1]["content"]
+
+        def __call__(self, text, return_tensors=None, truncation=False, max_length=None, add_special_tokens=True):
+            ids = [ord(c) % 50 + 1 for c in text][:max_length if truncation else None]
+            return {"input_ids": torch.tensor([ids])}
+
+    torch.manual_seed(0)
+    model = transformers.AutoModelForCausalLM.from_config(transformers.Qwen2Config(
+        vocab_size=64, hidden_size=16, intermediate_size=32, num_hidden_layers=2, num_attention_heads=2,
+        num_key_value_heads=2)).eval()
+    records = [{"input": "q1", "generated_output": "abc"}, {"input_text": "q2", "output_text": "de"}]
+    states = embed_with(model, Tok(), records, "cpu", "sys", log_every=0)
+    assert states.shape == (2, 3, 16) and states.dtype == np.float16
+    ids = torch.tensor([[ord(c) % 50 + 1 for c in "S:sysU:q1"] + [ord(c) % 50 + 1 for c in "abc"]])
+    with torch.inference_mode():
+        expected = torch.stack([h[0, -1] for h in model(ids, output_hidden_states=True).hidden_states]).numpy()
+    assert np.allclose(states[0].astype(np.float32), expected, atol=1e-2)

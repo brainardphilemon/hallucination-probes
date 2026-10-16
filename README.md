@@ -114,7 +114,15 @@ seed, attaches the weights and checks the result against that run's `results.csv
 hprobes import-legacy --run-dir <run folder with best_mlp.pt> --artifact-dir <features> --output model.pt
 ```
 
-`notebooks/kaggle_inference.ipynb` does this and then scores your examples.
+`notebooks/kaggle_inference.ipynb` does this and then scores your examples. If you have no hidden states, only
+answers from some model, `hprobes embed --records records.jsonl --output states.npy` computes Qwen's hidden states
+by replaying the chat prompt plus the answer, exactly as the training features were made (best on Qwen's own answers).
+
+### Several LLMs, one MLP
+
+`hprobes train --method mlp --artifact-dir qwen=<dir> llama=<dir> --sources qwen:tqa llama:tqa ... --targets llama:triviaqa
+--pooling logsumexp --pool-layers 15 --pca-dim 512` fits one PCA per LLM (15 x 512 numbers each) and trains one shared
+MLP. `hprobes predict` picks the right PCA from the shape of `--states` (or `--llm`).
 
 ## LLM-judge baselines
 
