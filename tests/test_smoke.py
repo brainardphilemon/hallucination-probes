@@ -443,3 +443,31 @@ def test_generate_drops_trailing_newline_before_end_of_turn():
     seen = []
     _, answers, last = generate_with(FakeModel(), Tok(), [{"input_text": "q"}], "cpu", "sys", log_every=0)
     assert seen[0] == [11, 12, 13, 20, 21]   # replay ends at the answer's last real token
+
+
+@pytest.mark.parametrize("extra", [[], ["--pca-dim", "8"]])
+def test_standardize_train_and_predict(artifacts, tmp_path, extra):
+    import torch
+
+    from hprobes.predict import Detector
+
+    summary = train(artifacts, tmp_path, "--method", "mlp", "--pooling", "logsumexp", "--pool-layers", "5",
+                    "--standardize", *extra)
+    assert summary["standardized"]
+    bundle = torch.load(tmp_path / "run" / "model.pt", weights_only=False)
+    assert bundle["models"]["default"]["standardize"]["mean"].shape == (bundle["head"]["input_dim"],)
+    detector = Detector.load(tmp_path / "run" / "model.pt")
+    with (tmp_path / "run" / "results.csv").open() as f:
+        expected = [float(r["sala_probability"]) for r in csv.DictReader(f)]
+    features = np.load(artifacts / "generation" / "triviaqa" / "features.npy")
+    assert np.allclose(detector.predict(features)["probability_correct"], expected, atol=1e-4)
+    # standardized features of the training LLM are ~N(0, 1) on its (pooled) source data
+    sources = np.concatenate([np.load(artifacts / "generation" / n / "features.npy") for n in ("tqa", "sciq", "popqa")])
+    f = detector.features(sources)
+    assert abs(float(f.mean())) < 0.1 and 0.8 < float(f.std()) < 1.2
+    # a "new LLM" 50x louder and with another depth: own-statistics standardization brings it back to scale
+    loud = (np.random.default_rng(0).normal(size=(12, 17, HIDDEN)) * 50).astype(np.float32)
+    g = detector.features(loud, standardize_on_input=True)
+    assert abs(float(g.mean())) < 1e-3 and abs(float(g.std()) - 1) < 0.05
+    out = detector.predict(loud, standardize_on_input=True)["raw_logit"]
+    assert np.isfinite(out).all() and np.abs(out).max() < 50

@@ -146,6 +146,13 @@ which hidden states need not satisfy, so expect them to be weaker than PCA; comp
 hprobes train --method mlp ... --pooling logsumexp --pool-layers 15 --pca-dim 512 --pca-fit dct
 ```
 
+### Standardization (`--standardize`)
+
+`hprobes train --method mlp --standardize` z-scores every MLP input feature with the mean / std of each LLM's source-train
+rows and stores them in `model.pt`; `hprobes predict` applies them, or with `--standardize-on-input` uses the statistics of the
+given batch instead (an LLM the detector never saw). `notebooks/kaggle_gemma_standardized.ipynb` trains a standardized Qwen
+detector and scores Gemma-2-9B-it both ways.
+
 ### Several LLMs, one MLP
 
 `hprobes train --method mlp --artifact-dir qwen=<dir> llama=<dir> --sources qwen:tqa llama:tqa ... --targets llama:triviaqa

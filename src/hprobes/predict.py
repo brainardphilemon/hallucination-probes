@@ -76,6 +76,8 @@ class Detector:
                                                       "pca": bundle["pca"]}}
         self.llms = {name: (int(m["n_layers"]), int(m["hidden_size"]),
                             LayerPCA.from_state(m["pca"]) if m["pca"] else None) for name, m in models.items()}
+        self.standardizers = {name: (m["standardize"]["mean"].float(), m["standardize"]["std"].float())
+                              for name, m in models.items() if m.get("standardize")}
         head = bundle["head"]
         self.model = residual_mlp(head["input_dim"], head["hidden_dim"], head["hidden_layers"], head["dropout"])
         self.model.load_state_dict(bundle["state_dict"])
@@ -110,10 +112,16 @@ class Detector:
                              f"it knows {known}")
         raise ValueError(f"Several LLMs share shape {tuple(shape)} ({matches}); pass llm=<name>")
 
-    def logits(self, states, batch_size: int = 256, llm: str | None = None, any_layers: bool = False) -> np.ndarray:
+    def features(self, states, batch_size: int = 256, llm: str | None = None, any_layers: bool = False,
+                 standardize_on_input: bool = False, return_pooled: bool = False):
+        """The MLP's input for these hidden states: pooling -> PCA / reduction (if any) -> standardization (if any).
+
+        standardize_on_input z-scores with the mean / std of this batch itself instead of the stored training
+        statistics; use it for an LLM the detector was not trained on (needs many examples).
+        """
         import torch
 
-        from hprobes.features import pool_layers
+        from hprobes.features import feature_moments, pool_layers, standardize_
 
         x = torch.as_tensor(np.asarray(states))
         if x.ndim == 2:
@@ -124,9 +132,10 @@ class Detector:
         b = self.bundle
         # A detector trained with --pool-layers N pools any layer count down to N, so layers never have to match.
         any_layers = any_layers or bool(b.get("pool_layers", 0))
-        pca, out_layers = None, b.get("pool_layers", 0)
+        pca, out_layers, name = None, b.get("pool_layers", 0), None
         if not (self.adaptive or self.fixed):
-            pca = self.llms[self.resolve(tuple(x.shape[1:]), llm, any_layers)][2]
+            name = self.resolve(tuple(x.shape[1:]), llm, any_layers)
+            pca = self.llms[name][2]
         if any_layers:
             # Pool the input's layers adaptively to the count this detector's PCA / MLP was trained on.
             if b["pooling"] == "none":
@@ -140,7 +149,7 @@ class Detector:
             return pool_layers(chunk.to(self.device).float(), b["pooling"], b["pool_kernel"], b["pool_stride"],
                                out_layers)
 
-        out = []
+        feats, pooled_parts = [], []
         with torch.inference_mode():
             if self.adaptive:
                 if len(x) < 2:
@@ -149,24 +158,46 @@ class Detector:
                 from hprobes.features import self_pca
 
                 whole = torch.cat([pooled(x[s:s + batch_size]).cpu() for s in range(0, len(x), batch_size)])
-                features_all = self_pca(whole, b["pca_dim"], b["pca_scope"], b["pca_seed"], self.device).flatten(1)
-            for start in range(0, len(x), batch_size):
-                if self.adaptive:
-                    features = features_all[start:start + batch_size]
-                elif self.fixed:
-                    from hprobes.features import fixed_reduce
-
-                    features = fixed_reduce(pooled(x[start:start + batch_size]).cpu(), b["pca_dim"], b["pca_fit"],
-                                            b["pca_scope"], b.get("reduce_norm", "rms"), self.device).flatten(1)
-                else:
+                feats = [self_pca(whole, b["pca_dim"], b["pca_scope"], b["pca_seed"], self.device).flatten(1)]
+                pooled_parts = [whole]
+            else:
+                for start in range(0, len(x), batch_size):
                     block = pooled(x[start:start + batch_size])
-                    features = pca.transform(block, self.device).flatten(1) if pca else block.flatten(1)
-                out.append(self.model(features.to(self.device)).float().cpu())
+                    if return_pooled:
+                        pooled_parts.append(block.cpu())
+                    if self.fixed:
+                        from hprobes.features import fixed_reduce
+
+                        f = fixed_reduce(block.cpu(), b["pca_dim"], b["pca_fit"], b["pca_scope"],
+                                         b.get("reduce_norm", "rms"), self.device)
+                    else:
+                        f = pca.transform(block, self.device) if pca else block.cpu()
+                    feats.append(f.flatten(1).float().cpu())
+            features = torch.cat(feats).clone()
+        if standardize_on_input:
+            standardize_(features, *feature_moments([features]))
+        else:
+            stats = self.standardizers.get(name) if name is not None else (
+                next(iter(self.standardizers.values())) if len(self.standardizers) == 1 else None)
+            if stats is not None:
+                standardize_(features, *stats)
+        if return_pooled:
+            return features, torch.cat(pooled_parts)
+        return features
+
+    def logits(self, states, batch_size: int = 256, llm: str | None = None, any_layers: bool = False,
+               standardize_on_input: bool = False) -> np.ndarray:
+        import torch
+
+        features = self.features(states, batch_size, llm, any_layers, standardize_on_input)
+        with torch.inference_mode():
+            out = [self.model(features[s:s + batch_size].to(self.device)).float().cpu()
+                   for s in range(0, len(features), batch_size)]
         return torch.cat(out).numpy()
 
-    def predict(self, states, batch_size: int = 256, llm: str | None = None,
-                any_layers: bool = False) -> dict[str, np.ndarray]:
-        logits = self.logits(states, batch_size, llm, any_layers)
+    def predict(self, states, batch_size: int = 256, llm: str | None = None, any_layers: bool = False,
+                standardize_on_input: bool = False) -> dict[str, np.ndarray]:
+        logits = self.logits(states, batch_size, llm, any_layers, standardize_on_input)
         probability = 1.0 / (1.0 + np.exp(-np.clip(logits, -80.0, 80.0)))
         correct = probability >= self.threshold
         return {"raw_logit": logits, "probability_correct": probability,
@@ -270,6 +301,9 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument("--any-layers", action="store_true",
                         help="Accept a different number of layers than the detector was trained on: they are pooled "
                              "adaptively to its pooled layer count (hidden size must still match)")
+    parser.add_argument("--standardize-on-input", action="store_true",
+                        help="Standardize the MLP inputs with the statistics of --states itself (for an LLM the detector "
+                             "was not trained on); give many examples")
     parser.add_argument("--threshold", type=float, help="Override the saved decision threshold on P(correct)")
     parser.add_argument("--device", default="cpu", help="cpu or cuda")
     return parser
@@ -282,7 +316,8 @@ def run(args) -> list[dict[str, Any]]:
     states = load_states(args.states)
     if np.ndim(states) == 2:
         states = np.asarray(states)[None]
-    prediction = detector.predict(states, llm=args.llm, any_layers=args.any_layers)
+    prediction = detector.predict(states, llm=args.llm, any_layers=args.any_layers,
+                                  standardize_on_input=args.standardize_on_input)
     count = len(prediction["raw_logit"])
     records = read_records(args.records) if args.records else [{} for _ in range(count)]
     if len(records) != count:

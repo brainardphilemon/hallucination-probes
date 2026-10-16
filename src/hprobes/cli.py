@@ -73,6 +73,9 @@ def add_train_args(p: argparse.ArgumentParser) -> None:
                         "inference); self: PCA computed from the rows it is applied to (any LLM, needs a batch); "
                         "avg / dct: data-free per-example reductions (mean of neighbouring hidden units / first "
                         "DCT coefficients), any LLM, even a single example")
+    g.add_argument("--standardize", action="store_true",
+                   help="method mlp: z-score every MLP input feature with the mean / std of each LLM's source-train "
+                        "rows (saved in model.pt; at inference a new LLM can use its own statistics)")
     g.add_argument("--reduce-norm", choices=("rms", "none"), default="rms",
                    help="avg / dct only: divide each layer's reduced vector by its RMS")
     g.add_argument("--pca-scope", choices=("global", "per-layer"), default="per-layer",

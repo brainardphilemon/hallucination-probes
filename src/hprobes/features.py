@@ -173,6 +173,35 @@ def fixed_reduce(x, dim: int, method: str = "dct", scope: str = "per-layer", nor
     return z.reshape(n, layers if scope == "per-layer" else 1, dim)
 
 
+def feature_moments(parts, chunk: int = 4096):
+    """Per-column mean and std over the rows of several 2-D CPU tensors, in float64 chunks (no big copies)."""
+    import torch
+
+    width = parts[0].shape[1]
+    total, total_sq, n = torch.zeros(width, dtype=torch.float64), torch.zeros(width, dtype=torch.float64), 0
+    for part in parts:
+        for start in range(0, len(part), chunk):
+            block = part[start:start + chunk].double()
+            total += block.sum(0)
+            total_sq += block.square().sum(0)
+            n += len(block)
+    if n < 2:
+        raise ValueError("Standardization needs at least 2 rows")
+    mean = total / n
+    var = (total_sq / n - mean.square()).clamp(min=0) * n / (n - 1)
+    return mean.float(), var.sqrt().float().clamp(min=1e-6)
+
+
+def standardize_(x, mean, std, chunk: int = 4096):
+    """In-place (x - mean) / std on a 2-D tensor, chunk by chunk."""
+    import torch
+
+    with torch.inference_mode():
+        for start in range(0, len(x), chunk):
+            x[start:start + chunk].sub_(mean).div_(std)
+    return x
+
+
 class LayerPCA:
     """PCA fitted on source-train rows only: one PCA over all features ('global') or one per layer."""
 

@@ -8,7 +8,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 
 from hprobes.data import StateDataset
-from hprobes.features import LayerPCA, pool_layers, pooled_layer_count, pooled_matrix, self_pca, fixed_reduce
+from hprobes.features import LayerPCA, pool_layers, pooled_layer_count, pooled_matrix, self_pca, fixed_reduce, feature_moments, standardize_
 from hprobes.losses import make_loss
 from hprobes.training import fit, predict, residual_mlp, seed_everything, tensor_loader
 
@@ -59,12 +59,37 @@ def run(args, data, device):
             return torch.cat([pcas[d.model].transform(pooled_matrix(StateDataset([d], split), args, device),
                                                       device).flatten(1) for d in domains])
 
-    if args.pca_dim:
+    elif args.standardize:
+        # No reduction: the pooled states themselves, kept in memory so they can be standardized.
+        def project(domains, split):
+            return torch.cat([pooled_matrix(StateDataset([d], split), args, device).flatten(1) for d in domains])
+
+    standardizers = {}
+    if args.pca_dim or args.standardize:
         x = {"train": project(data.sources, "train"), "val": project(data.sources, "val"),
              "test": project(data.sources, "test")}
         x.update({f"target:{d.name}": project([d], "all") for d in data.targets})
         input_dim = x["train"].shape[1]
-        print(f"PCA fit={args.pca_fit}: {[p.summary() for p in pcas.values()] or 'on each dataset itself'}; "
+        if args.standardize:
+            # z-score every MLP input feature with the mean / std of that LLM's source-train rows (stored in model.pt).
+            def layout(domains, split):
+                start, out = 0, []
+                for d in domains:
+                    n = len(d.split[split])
+                    out.append((d, slice(start, start + n)))
+                    start += n
+                return out
+
+            parts = {"train": layout(data.sources, "train"), "val": layout(data.sources, "val"),
+                     "test": layout(data.sources, "test")}
+            parts.update({f"target:{d.name}": [(d, slice(0, len(d.labels)))] for d in data.targets})
+            for llm in data.models:
+                standardizers[llm] = feature_moments([x["train"][sl] for d, sl in parts["train"] if d.model == llm])
+            for name, pieces in parts.items():
+                for d, sl in pieces:
+                    standardize_(x[name][sl], *standardizers[d.model])
+        print(f"features: PCA={'fit=' + args.pca_fit if args.pca_dim else 'none'} "
+              f"{[p.summary() for p in pcas.values()] or ''}; standardized={bool(standardizers)}; "
               f"MLP input={input_dim}", flush=True)
         loaders = {name: tensor_loader(x[name], labels[name], args.batch_size if name == "train" else 256,
                                        shuffle=name == "train", seed=args.seed) for name in splits}
@@ -98,13 +123,15 @@ def run(args, data, device):
         "pca_fit": args.pca_fit if args.pca_dim else None, "pca_dim": args.pca_dim, "pca_scope": args.pca_scope,
         "pca_seed": args.seed, "reduce_norm": args.reduce_norm,
         "models": {name: {"n_layers": layers, "hidden_size": hidden,
-                          "pca": pcas[name].state() if pcas else None}
+                          "pca": pcas[name].state() if pcas else None,
+                          "standardize": ({"mean": standardizers[name][0], "std": standardizers[name][1]}
+                                          if name in standardizers else None)}
                    for name, (layers, hidden) in data.models.items()},
         "head": {"input_dim": input_dim, "hidden_dim": args.hidden_dim, "hidden_layers": args.hidden_layers,
                  "dropout": args.dropout},
         "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
     })
-    summary = {"pooled_layers": pooled, "mlp_input_dimension": input_dim,
+    summary = {"pooled_layers": pooled, "mlp_input_dimension": input_dim, "standardized": bool(standardizers),
                "pca": {name: p.summary() for name, p in pcas.items()} or ({"fit": args.pca_fit, "dim": args.pca_dim}
                                                                          if args.pca_dim else None),
                "parameters": sum(p.numel() for p in model.parameters()),

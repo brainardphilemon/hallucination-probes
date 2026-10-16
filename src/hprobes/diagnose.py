@@ -12,46 +12,44 @@ see where an input stops looking like the training data:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 
 
-def stages(detector, states, llm: str | None = None) -> dict[str, Any]:
+def stages(detector, states, llm: str | None = None, standardize_on_input: bool = False) -> dict[str, Any]:
     import torch
 
-    from hprobes.features import adaptive_windows, pool_layers
+    from hprobes.features import adaptive_windows
 
     x = torch.as_tensor(np.asarray(states, dtype=np.float32))
     if x.ndim == 2:
         x = x.unsqueeze(0)
-    b = detector.bundle
-    name = detector.resolve(tuple(x.shape[1:]), llm, any_layers=True)
-    _, _, pca = detector.llms[name]
-    if pca is not None and pca.scope != "per-layer":
-        raise ValueError("diagnose supports detectors without PCA or with a per-layer PCA")
-    out_layers = len(pca.bases) if pca is not None else b["head"]["input_dim"] // x.shape[2]
+    features, pooled = detector.features(x, llm=llm, any_layers=True, standardize_on_input=standardize_on_input,
+                                         return_pooled=True)
     with torch.inference_mode():
-        pooled = pool_layers(x.to(detector.device), b["pooling"], b["pool_kernel"], b["pool_stride"], out_layers).cpu()
-        z = pca.transform(pooled, detector.device) if pca is not None else pooled  # what the MLP reads
-        logits = detector.model(z.flatten(1).to(detector.device)).float().cpu().numpy()
+        logits = detector.model(features.to(detector.device)).float().cpu().numpy()
+    reference = detector.logits(states, llm=llm, any_layers=True, standardize_on_input=standardize_on_input)
     return {
-        "llm": name, "input_shape": tuple(x.shape), "pooled_shape": tuple(pooled.shape),
-        "windows": adaptive_windows(x.shape[1], out_layers).tolist(),
+        "input_shape": tuple(x.shape), "pooled_shape": tuple(pooled.shape),
+        "windows": adaptive_windows(x.shape[1], pooled.shape[1]).tolist() if x.shape[1] > 1 else [[0]],
         "raw_norm": x.norm(dim=2).median(0).values.numpy(),          # (layers,)
         "pooled_norm": pooled.norm(dim=2).median(0).values.numpy(),   # (pooled layers,)
-        "pca": z.numpy(),                                 # MLP input: (n, pooled layers, PCA dim or hidden)
+        "pca": features.reshape(len(features), pooled.shape[1], -1).numpy(),  # MLP input per pooled layer
         "logits": logits,
-        "matches_detector": float(np.abs(logits - detector.logits(states, llm=llm, any_layers=True)).max()),
+        "matches_detector": float(np.abs(logits - reference).max()),
     }
 
 
-def report(model_path, inputs: dict[str, Any], reference: str, device: str = "cpu", llm: str | None = None) -> dict:
-    """Print a comparison of every input against ``inputs[reference]`` (normally real data of the training LLM)."""
+def report(model_path, inputs: dict[str, Any], reference: str, device: str = "cpu", llm: str | None = None,
+           standardize_on_input: Sequence[str] = ()) -> dict:
+    """Print a comparison of every input against ``inputs[reference]`` (normally real data of the training LLM).
+
+    Inputs named in ``standardize_on_input`` are standardized with their own statistics (new LLMs)."""
     from hprobes.predict import Detector
 
     detector = Detector.load(model_path, device)
-    results = {name: stages(detector, states, llm) for name, states in inputs.items()}
+    results = {name: stages(detector, states, llm, name in standardize_on_input) for name, states in inputs.items()}
     ref = results[reference]["pca"].reshape(len(results[reference]["pca"]), -1)
     mean, std = ref.mean(0), ref.std(0) + 1e-6
     threshold = detector.threshold
@@ -61,7 +59,7 @@ def report(model_path, inputs: dict[str, Any], reference: str, device: str = "cp
         prob = 1 / (1 + np.exp(-np.clip(r["logits"], -80, 80)))
         layers = len(r["raw_norm"])
         picks = sorted({0, layers // 2, layers - 1})
-        print(f"\n== {name}  (LLM slot '{r['llm']}')")
+        print(f"\n== {name}" + ("  (standardized with its own statistics)" if name in standardize_on_input else ""))
         print(f"  input {r['input_shape']} -> pooled {r['pooled_shape']}; first windows {r['windows'][:3]}, last {r['windows'][-1]}")
         print("  median raw norm at layers " + ", ".join(f"{i}: {r['raw_norm'][i]:.1f}" for i in picks))
         print("  median pooled norm first/mid/last: " + ", ".join(f"{v:.1f}" for v in r["pooled_norm"][[0, len(r['pooled_norm']) // 2, -1]]))
