@@ -116,6 +116,14 @@ hprobes import-legacy --run-dir <run folder with best_mlp.pt> --artifact-dir <fe
 
 `notebooks/kaggle_inference.ipynb` does this and then scores your examples.
 
+### Other layer counts and Gemma
+
+Pooling handles the layer count: a detector trained with `--pool-layers N` (and the rebuilt Qwen detector) pools any number of
+layers down to its own count, so only the hidden size has to match. `hprobes generate` produces answers and hidden states
+from any chat model (it handles templates without a system role, several stop tokens and bf16/eager attention for
+Gemma 2). `notebooks/kaggle_gemma_triviaqa10.ipynb` runs Gemma-2-9B-it on 10 TriviaQA questions through the Qwen detector;
+equal hidden size does not make Qwen's PCA meaningful for Gemma's neurons, so treat the scores as a plumbing test.
+
 ### PCA like pooling (`--pca-fit self`)
 
 By default (`--pca-fit source`) the PCA is fitted once on source-train and its matrices are stored in `model.pt`, so

@@ -27,7 +27,7 @@ def rebuild(run_dir: Path, artifact_dir: Path, output: Path, device: str = "cuda
     import torch
 
     from hprobes.data import StateDataset, load_experiment
-    from hprobes.features import LayerPCA, pooled_matrix
+    from hprobes.features import LayerPCA, pooled_layer_count, pooled_matrix
     from hprobes.predict import BUNDLE_FORMAT, Detector
     from hprobes.training import get_device
 
@@ -60,7 +60,11 @@ def rebuild(run_dir: Path, artifact_dir: Path, output: Path, device: str = "cuda
 
     state = {k: v.cpu() for k, v in saved["model"].items()}
     bundle = {
-        "format": BUNDLE_FORMAT, "pooling": pooling, "pool_kernel": kernel, "pool_stride": stride, "pool_layers": 0,
+        "format": BUNDLE_FORMAT, "pooling": pooling, "pool_kernel": kernel, "pool_stride": stride,
+        # kernel 3 / stride 2 equals adaptive pooling to the same count (exact for logsumexp and max), which lets
+        # the detector take other layer counts; verified against the original run's results below.
+        "pool_layers": (pooled_layer_count(data.n_layers, pooling, kernel, stride)
+                        if pooling in ("logsumexp", "max") and kernel == 3 and stride == 2 else 0),
         "n_layers": data.n_layers, "hidden_size": data.hidden_size, "pca": pca_state,
         "head": {"input_dim": int(saved["input_dim"]), "hidden_dim": int(saved["hidden_dim"]),
                  "hidden_layers": int(saved["hidden_layers"]), "dropout": 0.2},

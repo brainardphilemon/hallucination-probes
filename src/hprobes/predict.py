@@ -87,7 +87,13 @@ class Detector:
 
         return cls(torch.load(Path(path), map_location="cpu", weights_only=False), device)
 
-    def resolve(self, shape: tuple[int, int], llm: str | None = None) -> str:
+    def resolve(self, shape: tuple[int, int], llm: str | None = None, any_layers: bool = False) -> str:
+        if any_layers:  # layer count is adapted by pooling; only the hidden size has to match
+            names = [n for n, (_, hidden, _) in self.llms.items() if hidden == shape[1] and llm in (None, n)]
+            if len(names) != 1:
+                known = {n: f"hidden {h}" for n, (_, h, _) in self.llms.items()}
+                raise ValueError(f"No single LLM in this detector has hidden size {shape[1]}; it knows {known}")
+            return names[0]
         if llm is not None:
             if llm not in self.llms:
                 raise ValueError(f"Unknown LLM {llm!r}; this detector knows {sorted(self.llms)}")
@@ -104,7 +110,7 @@ class Detector:
                              f"it knows {known}")
         raise ValueError(f"Several LLMs share shape {tuple(shape)} ({matches}); pass llm=<name>")
 
-    def logits(self, states, batch_size: int = 256, llm: str | None = None) -> np.ndarray:
+    def logits(self, states, batch_size: int = 256, llm: str | None = None, any_layers: bool = False) -> np.ndarray:
         import torch
 
         from hprobes.features import pool_layers
@@ -116,11 +122,23 @@ class Detector:
             raise ValueError(f"Expected hidden states of shape (N, layers, hidden) or (layers, hidden); "
                              f"got {tuple(x.shape)}")
         b = self.bundle
-        pca = None if self.adaptive or self.fixed else self.llms[self.resolve(tuple(x.shape[1:]), llm)][2]
+        # A detector trained with --pool-layers N pools any layer count down to N, so layers never have to match.
+        any_layers = any_layers or bool(b.get("pool_layers", 0))
+        pca, out_layers = None, b.get("pool_layers", 0)
+        if not (self.adaptive or self.fixed):
+            pca = self.llms[self.resolve(tuple(x.shape[1:]), llm, any_layers)][2]
+        if any_layers:
+            # Pool the input's layers adaptively to the count this detector's PCA / MLP was trained on.
+            if b["pooling"] == "none":
+                raise ValueError("--any-layers needs a detector trained with layer pooling")
+            hidden = x.shape[2]
+            out_layers = (b["head"]["input_dim"] // hidden if pca is None and not (self.adaptive or self.fixed)
+                          else len(pca.bases) if pca and pca.scope == "per-layer"
+                          else pca.bases[0].shape[0] // hidden if pca else out_layers)
 
         def pooled(chunk):
             return pool_layers(chunk.to(self.device).float(), b["pooling"], b["pool_kernel"], b["pool_stride"],
-                               b.get("pool_layers", 0))
+                               out_layers)
 
         out = []
         with torch.inference_mode():
@@ -146,8 +164,9 @@ class Detector:
                 out.append(self.model(features.to(self.device)).float().cpu())
         return torch.cat(out).numpy()
 
-    def predict(self, states, batch_size: int = 256, llm: str | None = None) -> dict[str, np.ndarray]:
-        logits = self.logits(states, batch_size, llm)
+    def predict(self, states, batch_size: int = 256, llm: str | None = None,
+                any_layers: bool = False) -> dict[str, np.ndarray]:
+        logits = self.logits(states, batch_size, llm, any_layers)
         probability = 1.0 / (1.0 + np.exp(-np.clip(logits, -80.0, 80.0)))
         correct = probability >= self.threshold
         return {"raw_logit": logits, "probability_correct": probability,
@@ -248,6 +267,9 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument("--bleurt-revision", default=DEFAULT_BLEURT_REVISION)
     parser.add_argument("--bleurt-batch-size", type=int, default=16)
     parser.add_argument("--llm", help="Which LLM's PCA to use; default: the one matching the shape of --states")
+    parser.add_argument("--any-layers", action="store_true",
+                        help="Accept a different number of layers than the detector was trained on: they are pooled "
+                             "adaptively to its pooled layer count (hidden size must still match)")
     parser.add_argument("--threshold", type=float, help="Override the saved decision threshold on P(correct)")
     parser.add_argument("--device", default="cpu", help="cpu or cuda")
     return parser
@@ -260,7 +282,7 @@ def run(args) -> list[dict[str, Any]]:
     states = load_states(args.states)
     if np.ndim(states) == 2:
         states = np.asarray(states)[None]
-    prediction = detector.predict(states, llm=args.llm)
+    prediction = detector.predict(states, llm=args.llm, any_layers=args.any_layers)
     count = len(prediction["raw_logit"])
     records = read_records(args.records) if args.records else [{} for _ in range(count)]
     if len(records) != count:

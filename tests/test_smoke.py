@@ -194,9 +194,9 @@ def test_train_on_several_llms_and_autodetect_shape(tmp_path):
     qwen_states, llama_states = (np.load(d / "generation" / "triviaqa" / "features.npy") for d in (a, b))
     assert detector.predict(qwen_states)["probability_correct"].shape == (ROWS,)
     assert detector.predict(llama_states)["probability_correct"].shape == (ROWS,)
-    with pytest.raises(ValueError, match="No LLM"):
-        detector.predict(np.zeros((2, 7, 32), dtype=np.float16))
-    with pytest.raises(ValueError, match="expects"):
+    with pytest.raises(ValueError, match="hidden size"):
+        detector.predict(np.zeros((2, 7, 40), dtype=np.float16))
+    with pytest.raises(ValueError, match="hidden size"):
         detector.predict(llama_states, llm="qwen")
 
 
@@ -275,3 +275,51 @@ def test_train_and_predict_with_fixed_reduction(artifacts, tmp_path, method):
     assert np.allclose(detector.predict(features[:1])["probability_correct"], expected[:1], atol=1e-4)  # one example works
     other = np.random.default_rng(1).normal(size=(3, 40, 100)).astype(np.float16)  # another LLM's shape
     assert detector.predict(other)["probability_correct"].shape == (3,)
+
+
+def test_any_layers_pools_to_trained_layer_count(artifacts, tmp_path):
+    from hprobes.predict import Detector
+
+    train(artifacts, tmp_path, "--method", "mlp", "--pooling", "logsumexp", "--pca-dim", "8")  # 9 layers -> 5
+    detector = Detector.load(tmp_path / "run" / "model.pt")
+    features = np.load(artifacts / "generation" / "triviaqa" / "features.npy")
+    assert np.allclose(detector.predict(features)["raw_logit"],
+                       detector.predict(features, any_layers=True)["raw_logit"], atol=1e-4)
+    deeper = np.random.default_rng(0).normal(size=(4, 21, HIDDEN)).astype(np.float16)  # another LLM: 21 layers
+    assert detector.predict(deeper, any_layers=True)["raw_logit"].shape == (4,)
+    with pytest.raises(ValueError):
+        detector.predict(deeper)  # without the option the layer count must match
+    with pytest.raises(ValueError, match="hidden size"):
+        detector.predict(np.zeros((2, 21, HIDDEN + 1), dtype=np.float16), any_layers=True)
+
+
+def test_generate_handles_templates_without_system_role_and_multiple_stop_tokens():
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from hprobes.generate import build_prompt, generate_with, stop_token_ids
+
+    class Tok:
+        eos_token_id, pad_token_id = 1, None
+
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+            if messages[0]["role"] == "system":
+                raise ValueError("System role not supported")
+            return "<bos>" + messages[0]["content"]
+
+        def __call__(self, text, return_tensors=None, truncation=False, max_length=None, add_special_tokens=True):
+            assert add_special_tokens is False
+            ids = [ord(c) % 50 + 2 for c in text][:max_length if truncation else None]
+            return transformers.BatchEncoding({"input_ids": torch.tensor([ids])})
+
+        def decode(self, ids, skip_special_tokens=True):
+            return "".join(chr(int(i) + 40) for i in ids)
+
+    assert build_prompt(Tok(), "q", "sys") == "<bos>sys\n\nq"
+    torch.manual_seed(0)
+    model = transformers.AutoModelForCausalLM.from_config(transformers.Qwen2Config(
+        vocab_size=64, hidden_size=16, intermediate_size=32, num_hidden_layers=3, num_attention_heads=2,
+        num_key_value_heads=2, eos_token_id=[1, 7])).eval()
+    assert stop_token_ids(Tok(), model) == [1, 7]
+    states, answers = generate_with(model, Tok(), [{"input_text": "hello"}, {"input_text": "hi"}], "cpu", "sys",
+                                    max_new_tokens=4, log_every=0)
+    assert states.shape == (2, 4, 16) and len(answers) == 2
