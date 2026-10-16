@@ -525,3 +525,19 @@ def test_model_load_settings_gemma_vs_qwen(tmp_path):
             return {9: "\n", 20: "Golf", 21: "."}.get(int(ids[0]), "")
 
     assert answer_token_ids([20, 21, 9, 107, 1], Tok(), [1]) == [20, 21]
+
+
+def test_saved_questions_reuse_existing_artifact(tmp_path):
+    from hprobes.extract import saved_questions
+
+    folder = tmp_path / "generation" / "triviaqa"
+    folder.mkdir(parents=True)
+    rows = [{"id": f"t{i}", "input_text": f"question {i}", "output_text": "a", "ground_truth_answers": [f"ref {i}"]}
+            for i in range(20)]
+    (folder / "rows.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    first = saved_questions(tmp_path, "triviaqa", 7)
+    assert [q["id"] for q in first] == [f"t{i}" for i in range(7)]          # stored order, first N
+    assert first[3] == {"id": "t3", "input_text": "question 3", "ground_truth_answers": ["ref 3"]}
+    assert len(saved_questions(tmp_path, "triviaqa")) == 20
+    with pytest.raises(SystemExit):
+        saved_questions(tmp_path, "sciq")

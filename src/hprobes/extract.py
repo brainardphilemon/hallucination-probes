@@ -459,6 +459,9 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument("--bleurt-revision", default=DEFAULT_BLEURT_REVISION)
     parser.add_argument("--samples-per-domain", type=int, default=0,
                         help="Deterministic sample count per domain; 0 uses each full split")
+    parser.add_argument("--questions-from", type=Path,
+                        help="Take the questions from an existing artifact folder (its generation/<domain>/rows.jsonl, "
+                             "first --samples-per-domain rows) instead of downloading the datasets")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument("--max-input-tokens", type=int, default=512)
@@ -468,6 +471,17 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument("--bleurt-batch-size", type=int, default=16)
     parser.add_argument("--cache-dir")
     return parser
+
+
+def saved_questions(artifact_dir: Path, domain: str, limit: int = 0) -> list[dict[str, Any]]:
+    """Questions (id, input_text, references) in the order they are stored in an existing artifact folder, so a new
+    model answers exactly the questions an earlier extraction used; the first ``limit`` rows if limit > 0."""
+    rows = read_jsonl(Path(artifact_dir) / "generation" / domain / "rows.jsonl")
+    if not rows:
+        raise SystemExit(f"No saved questions for {domain} under {artifact_dir}")
+    rows = rows[:limit] if limit else rows
+    return [{"id": str(r["id"]), "input_text": r["input_text"], "ground_truth_answers": r["ground_truth_answers"]}
+            for r in rows]
 
 
 def run(args: argparse.Namespace) -> None:
@@ -482,7 +496,11 @@ def run(args: argparse.Namespace) -> None:
     output_dir = args.artifact_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     if args.stage in ("all", "generate"):
-        ensure_generation({domain: load_domain_records(domain, args) for domain in domains}, args, output_dir)
+        if args.questions_from:
+            records = {d: saved_questions(args.questions_from, d, args.samples_per_domain) for d in domains}
+        else:
+            records = {domain: load_domain_records(domain, args) for domain in domains}
+        ensure_generation(records, args, output_dir)
     if args.stage in ("all", "bleurt"):
         ensure_bleurt(domains, args, output_dir)
 
