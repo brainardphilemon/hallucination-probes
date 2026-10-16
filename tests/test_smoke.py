@@ -93,7 +93,6 @@ def test_preset_rejects_overlap(artifacts, tmp_path):
 
 @pytest.mark.parametrize("extra", [["--pooling", "logsumexp", "--pca-dim", "8"], ["--pooling", "max"]])
 def test_predict_reproduces_training_scores(artifacts, tmp_path, extra):
-    import csv
 
     from hprobes.predict import Detector
 
@@ -123,3 +122,31 @@ def test_predict_cli(artifacts, tmp_path):
           "--records", str(records), "--output", str(tmp_path / "p.jsonl")])
     first = json.loads((tmp_path / "p.jsonl").read_text().splitlines()[0])
     assert first["generated_output"] == "a0" and first["verdict"] in ("correct", "hallucinated")
+
+
+def test_import_legacy_roundtrip(artifacts, tmp_path):
+    """Simulate an old sala_raw_concat.py run (weights + summary, no PCA) and rebuild the bundle."""
+    import torch
+
+    from hprobes.legacy import rebuild
+    from hprobes.predict import Detector
+
+    summary = train(artifacts, tmp_path, "--method", "mlp", "--pooling", "logsumexp", "--pca-dim", "8")
+    run = tmp_path / "run"
+    bundle = torch.load(run / "model.pt", weights_only=False)
+    old = tmp_path / "old"
+    old.mkdir()
+    torch.save({"input_dim": bundle["head"]["input_dim"], "hidden_dim": bundle["head"]["hidden_dim"],
+                "hidden_layers": bundle["head"]["hidden_layers"], "pooling": "none",
+                "model": bundle["state_dict"]}, old / "best_mlp.pt")
+    (old / "results.csv").write_text((run / "results.csv").read_text())
+    (old / "summary.json").write_text(json.dumps({
+        "pooling_method": "logsumexp1d", "pool_kernel_size": 3, "seed": 42, "feature_pca_dim": 8,
+        "feature_pca_per_layer": True, "source_domains": ["tqa", "sciq", "popqa"], "target_domain": "triviaqa",
+        "num_layers_including_embedding_output": LAYERS, "hidden_size": HIDDEN, "bleurt_threshold": 0.5,
+        "sala_threshold": summary["threshold"], "label_definition": summary["label_definition"],
+        "target_metrics": summary["target_metrics"]["triviaqa"]}))
+    report = rebuild(old, artifacts, tmp_path / "rebuilt.pt", "cpu")
+    assert report["max_abs_probability_diff"] < 1e-5
+    assert abs(report["target_auroc_rebuilt"] - report["target_auroc_original"]) < 1e-6
+    assert Detector.load(tmp_path / "rebuilt.pt").threshold == summary["threshold"]

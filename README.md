@@ -104,6 +104,18 @@ out = Detector.load("runs/mlp/model.pt").predict(states)
 out["probability_correct"], out["hallucinated"]   # label 1 = correct, 0 = hallucinated
 ```
 
+### Models trained with the old SALA fork
+
+`sala_raw_concat.py` runs (for example `nvthaai/sala-g14-logsumexp-layerpca512-4x128`) saved the MLP and
+threshold but not the PCA. `hprobes import-legacy` rebuilds the PCA from the saved features with the same
+seed, attaches the weights and checks the result against that run's `results.csv`:
+
+```bash
+hprobes import-legacy --run-dir <run folder with best_mlp.pt> --artifact-dir <features> --output model.pt
+```
+
+`notebooks/kaggle_inference.ipynb` does this and then scores your examples.
+
 ## LLM-judge baselines
 
 ```bash
