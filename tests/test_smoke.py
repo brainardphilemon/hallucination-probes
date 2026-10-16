@@ -198,31 +198,3 @@ def test_train_on_several_llms_and_autodetect_shape(tmp_path):
         detector.predict(np.zeros((2, 7, 32), dtype=np.float16))
     with pytest.raises(ValueError, match="expects"):
         detector.predict(llama_states, llm="qwen")
-
-
-def test_embed_replays_prompt_plus_answer():
-    torch = pytest.importorskip("torch")
-    transformers = pytest.importorskip("transformers")
-    from hprobes.embed import embed_with
-
-    class Tok:
-        eos_token_id = pad_token_id = 0
-
-        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
-            return "S:" + messages[0]["content"] + "U:" + messages[1]["content"]
-
-        def __call__(self, text, return_tensors=None, truncation=False, max_length=None, add_special_tokens=True):
-            ids = [ord(c) % 50 + 1 for c in text][:max_length if truncation else None]
-            return {"input_ids": torch.tensor([ids])}
-
-    torch.manual_seed(0)
-    model = transformers.AutoModelForCausalLM.from_config(transformers.Qwen2Config(
-        vocab_size=64, hidden_size=16, intermediate_size=32, num_hidden_layers=2, num_attention_heads=2,
-        num_key_value_heads=2)).eval()
-    records = [{"input": "q1", "generated_output": "abc"}, {"input_text": "q2", "output_text": "de"}]
-    states = embed_with(model, Tok(), records, "cpu", "sys", log_every=0)
-    assert states.shape == (2, 3, 16) and states.dtype == np.float16
-    ids = torch.tensor([[ord(c) % 50 + 1 for c in "S:sysU:q1"] + [ord(c) % 50 + 1 for c in "abc"]])
-    with torch.inference_mode():
-        expected = torch.stack([h[0, -1] for h in model(ids, output_hidden_states=True).hidden_states]).numpy()
-    assert np.allclose(states[0].astype(np.float32), expected, atol=1e-2)

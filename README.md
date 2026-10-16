@@ -114,9 +114,7 @@ seed, attaches the weights and checks the result against that run's `results.csv
 hprobes import-legacy --run-dir <run folder with best_mlp.pt> --artifact-dir <features> --output model.pt
 ```
 
-`notebooks/kaggle_inference.ipynb` does this and then scores your examples. If you have no hidden states, only
-answers from some model, `hprobes embed --records records.jsonl --output states.npy` computes Qwen's hidden states
-by replaying the chat prompt plus the answer, exactly as the training features were made (best on Qwen's own answers).
+`notebooks/kaggle_inference.ipynb` does this and then scores your examples.
 
 ### Several LLMs, one MLP
 

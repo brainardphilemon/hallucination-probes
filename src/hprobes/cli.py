@@ -1,4 +1,4 @@
-"""Command line: ``hprobes extract | train | predict | embed | import-legacy | judge``.
+"""Command line: ``hprobes extract | train | predict | import-legacy | judge``.
 
 Examples::
 
@@ -197,11 +197,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     from hprobes import predict as predict_module
 
     predict_module.build_parser(sub.add_parser("predict", help="Score new examples with a trained model.pt"))
-    from hprobes import embed as embed_module
     from hprobes import legacy
 
     legacy.build_parser(sub.add_parser("import-legacy", help="Turn an old sala_raw_concat.py run into a model.pt"))
-    embed_module.build_parser(sub.add_parser("embed", help="Qwen hidden states for (input, answer) text from any generator"))
     judge = sub.add_parser("judge", help="LLM-judge baselines over saved answers (Jev, LAYA)")
     judge.add_argument("judge", choices=("jev", "laya"))
     judge.add_argument("judge_args", nargs=argparse.REMAINDER, help="Arguments passed to the judge script")
@@ -212,8 +210,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         train(args)
     elif args.command == "predict":
         predict_module.run(args)
-    elif args.command == "embed":
-        embed_module.run(args)
     elif args.command == "import-legacy":
         legacy.rebuild(args.run_dir, args.artifact_dir, args.output, args.device)
     else:
