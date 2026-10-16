@@ -29,7 +29,12 @@ def build_prompt(tokenizer, question: str, system_prompt: str) -> str:
                                              tokenize=False, add_generation_prompt=True)
 
 
+END_OF_TURN_TOKENS = ("<end_of_turn>", "<|im_end|>", "<|eot_id|>", "<|end|>", "<|endoftext|>", "</s>")
+
+
 def stop_token_ids(tokenizer, model) -> list[int]:
+    """Ids that end an answer: the model's configured EOS ids, the tokenizer's EOS / pad, and known end-of-turn
+    markers present in the vocabulary (Gemma's <end_of_turn> is often missing from generation_config)."""
     ids: set[int] = set()
     configured = getattr(model.generation_config, "eos_token_id", None)
     for value in ([configured] if isinstance(configured, int) else list(configured or [])):
@@ -37,7 +42,20 @@ def stop_token_ids(tokenizer, model) -> list[int]:
     for value in (tokenizer.eos_token_id, tokenizer.pad_token_id):
         if value is not None:
             ids.add(int(value))
+    convert, unk = getattr(tokenizer, "convert_tokens_to_ids", None), getattr(tokenizer, "unk_token_id", None)
+    for name in END_OF_TURN_TOKENS if convert else ():
+        value = convert(name)
+        if isinstance(value, int) and value >= 0 and value != unk:
+            ids.add(value)
     return sorted(ids)
+
+
+def strip_trailing(ids, drop: set[int]):
+    """Remove trailing end / special tokens so the kept hidden state is the answer's last real token."""
+    end = len(ids)
+    while end and int(ids[end - 1]) in drop:
+        end -= 1
+    return ids[:end]
 
 
 def generate_with(model, tokenizer, records: Sequence[dict[str, Any]], device: str, system_prompt: str,
@@ -48,6 +66,7 @@ def generate_with(model, tokenizer, records: Sequence[dict[str, Any]], device: s
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
     stops = stop_token_ids(tokenizer, model)
+    trailing = set(stops) | {int(i) for i in getattr(tokenizer, "all_special_ids", [])}
     states, answers, last_tokens = [], [], []
     with torch.inference_mode():
         for i, record in enumerate(records):
@@ -58,10 +77,7 @@ def generate_with(model, tokenizer, records: Sequence[dict[str, Any]], device: s
             generated = model.generate(**encoded, max_new_tokens=max_new_tokens, do_sample=False, num_beams=1,
                                        use_cache=True, pad_token_id=tokenizer.pad_token_id,
                                        eos_token_id=stops)[0, encoded["input_ids"].shape[1]:]
-            end = len(generated)
-            while end and int(generated[end - 1]) in stops:
-                end -= 1
-            answer_ids = generated[:end]
+            answer_ids = strip_trailing(generated, trailing)
             replay_ids = torch.cat([encoded["input_ids"][0], answer_ids]).unsqueeze(0)
             replay = model(replay_ids, attention_mask=torch.ones_like(replay_ids), output_hidden_states=True,
                            use_cache=False, return_dict=True)

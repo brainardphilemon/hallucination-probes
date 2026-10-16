@@ -354,3 +354,25 @@ def test_diagnose_report_matches_detector(artifacts, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "stages reproduce Detector.logits" in out and results["other"]["pooled_shape"] == (6, 5, HIDDEN)
     assert all(r["matches_detector"] < 1e-4 for r in results.values())
+
+
+def test_answer_end_tokens_are_stripped():
+    """Gemma ends with <end_of_turn> <eos>; the kept state must be the answer's last real token (bug seen on Kaggle)."""
+    from hprobes.generate import stop_token_ids, strip_trailing
+
+    class Tok:
+        eos_token_id, pad_token_id, unk_token_id = 1, 0, 3
+        all_special_ids = [0, 1, 2, 3, 107]
+        vocab = {"<end_of_turn>": 107}
+
+        def convert_tokens_to_ids(self, name):
+            return self.vocab.get(name, self.unk_token_id)
+
+    class Model:
+        class generation_config:
+            eos_token_id = 1
+
+    stops = stop_token_ids(Tok(), Model())
+    assert 107 in stops and 3 not in stops
+    assert strip_trailing([50, 51, 52, 107, 1], set(stops)) == [50, 51, 52]
+    assert strip_trailing([50, 107, 0, 0], set(stops)) == [50]
