@@ -209,7 +209,8 @@ class LayerPCA:
     def transform(self, x, device):
         import torch
 
-        return torch.stack([((self._block(x, g).to(device) - m) @ b).cpu()
+        # Means and bases may live on another device (a bundle loaded from model.pt keeps them on the CPU).
+        return torch.stack([((self._block(x, g).to(device) - m.to(device)) @ b.to(device)).cpu()
                             for g, m, b in zip(self._groups(x), self.means, self.bases)], dim=1)
 
     def state(self) -> dict:

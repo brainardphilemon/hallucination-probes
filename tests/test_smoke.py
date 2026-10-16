@@ -323,3 +323,22 @@ def test_generate_handles_templates_without_system_role_and_multiple_stop_tokens
     states, answers = generate_with(model, Tok(), [{"input_text": "hello"}, {"input_text": "hi"}], "cpu", "sys",
                                     max_new_tokens=4, log_every=0)
     assert states.shape == (2, 4, 16) and len(answers) == 2
+
+
+@pytest.mark.parametrize("device", ["mps", "cuda"])
+def test_loaded_bundle_runs_on_gpu(artifacts, tmp_path, device):
+    """A model.pt keeps its PCA on the CPU; predicting on a GPU must move it (failed on Kaggle T4)."""
+    import torch
+
+    from hprobes.predict import Detector
+
+    if device == "mps" and not torch.backends.mps.is_available() or device == "cuda" and not torch.cuda.is_available():
+        pytest.skip(f"{device} not available")
+    train(artifacts, tmp_path, "--method", "mlp", "--pooling", "logsumexp", "--pca-dim", "8")
+    features = np.load(artifacts / "generation" / "triviaqa" / "features.npy")
+    cpu = Detector.load(tmp_path / "run" / "model.pt").predict(features)["probability_correct"]
+    gpu_detector = Detector.load(tmp_path / "run" / "model.pt")
+    gpu_detector.device = torch.device(device)
+    gpu_detector.model.to(device)
+    gpu = gpu_detector.predict(features, any_layers=True)["probability_correct"]
+    assert np.allclose(cpu, gpu, atol=1e-3)
