@@ -68,6 +68,9 @@ def add_train_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--pool-layers", type=int, default=0,
                    help="Pool any number of layers down to exactly this many (e.g. 15); 0 = use kernel/stride")
     g.add_argument("--pca-dim", type=int, default=0, help="PCA components fitted on source-train (0 = off; mlp, sala)")
+    g.add_argument("--pca-fit", choices=("source", "self"), default="source",
+                   help="source: PCA fitted once on source-train and stored (needs the same LLM at inference); "
+                        "self: PCA computed from the rows it is applied to, like pooling (any LLM / hidden size)")
     g.add_argument("--pca-scope", choices=("global", "per-layer"), default="per-layer",
                    help="One PCA over all features or one per (pooled) layer")
     g.add_argument("--feature-clip", type=float, default=10.0, help="Clamp standardized states (transformer methods)")

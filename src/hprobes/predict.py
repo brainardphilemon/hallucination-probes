@@ -70,6 +70,7 @@ class Detector:
         self.bundle = bundle
         self.device = torch.device(device if device != "cuda" or torch.cuda.is_available() else "cpu")
         self.threshold = float(bundle["threshold"])
+        self.adaptive = bundle.get("pca_fit") == "self"  # PCA is recomputed from the input itself
         models = bundle.get("models") or {"default": {"n_layers": bundle["n_layers"], "hidden_size": bundle["hidden_size"],
                                                       "pca": bundle["pca"]}}
         self.llms = {name: (int(m["n_layers"]), int(m["hidden_size"]),
@@ -113,16 +114,30 @@ class Detector:
         if x.ndim != 3:
             raise ValueError(f"Expected hidden states of shape (N, layers, hidden) or (layers, hidden); "
                              f"got {tuple(x.shape)}")
-        pca = self.llms[self.resolve(tuple(x.shape[1:]), llm)][2]
         b = self.bundle
+        pca = None if self.adaptive else self.llms[self.resolve(tuple(x.shape[1:]), llm)][2]
+
+        def pooled(chunk):
+            return pool_layers(chunk.to(self.device).float(), b["pooling"], b["pool_kernel"], b["pool_stride"],
+                               b.get("pool_layers", 0))
+
         out = []
         with torch.inference_mode():
+            if self.adaptive:
+                if len(x) < 2:
+                    raise ValueError("This detector computes its PCA from the examples you give it, so it needs "
+                                     "a batch of at least 2 (ideally more than the PCA dimension)")
+                from hprobes.features import self_pca
+
+                whole = torch.cat([pooled(x[s:s + batch_size]).cpu() for s in range(0, len(x), batch_size)])
+                features_all = self_pca(whole, b["pca_dim"], b["pca_scope"], b["pca_seed"], self.device).flatten(1)
             for start in range(0, len(x), batch_size):
-                block = x[start:start + batch_size].to(self.device).float()
-                block = pool_layers(block, b["pooling"], b["pool_kernel"], b["pool_stride"], b.get("pool_layers", 0))
-                features = pca.transform(block, self.device).flatten(1).to(self.device) if pca \
-                    else block.flatten(1)
-                out.append(self.model(features).float().cpu())
+                if self.adaptive:
+                    features = features_all[start:start + batch_size]
+                else:
+                    block = pooled(x[start:start + batch_size])
+                    features = pca.transform(block, self.device).flatten(1) if pca else block.flatten(1)
+                out.append(self.model(features.to(self.device)).float().cpu())
         return torch.cat(out).numpy()
 
     def predict(self, states, batch_size: int = 256, llm: str | None = None) -> dict[str, np.ndarray]:

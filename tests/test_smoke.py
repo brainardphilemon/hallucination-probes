@@ -198,3 +198,44 @@ def test_train_on_several_llms_and_autodetect_shape(tmp_path):
         detector.predict(np.zeros((2, 7, 32), dtype=np.float16))
     with pytest.raises(ValueError, match="expects"):
         detector.predict(llama_states, llm="qwen")
+
+
+def test_self_fitted_pca_works_for_any_shape(artifacts, tmp_path):
+    import torch
+
+    from hprobes.features import self_pca
+    from hprobes.predict import Detector
+
+    summary = train(artifacts, tmp_path, "--method", "mlp", "--pooling", "logsumexp", "--pool-layers", "5",
+                    "--pca-dim", "8", "--pca-fit", "self")
+    assert summary["mlp_input_dimension"] == 5 * 8
+    detector = Detector.load(tmp_path / "run" / "model.pt")
+    with (tmp_path / "run" / "results.csv").open() as f:
+        expected = [float(r["sala_probability"]) for r in csv.DictReader(f)]
+    features = np.load(artifacts / "generation" / "triviaqa" / "features.npy")
+    assert np.allclose(detector.predict(features)["probability_correct"], expected, atol=1e-4)
+    rng = np.random.default_rng(0)
+    for layers, hidden in ((7, 20), (40, 100), (3, 6)):  # other LLM shapes still run; hidden < PCA dim is zero-padded
+        out = detector.predict(rng.normal(size=(30, layers, hidden)).astype(np.float16))
+        assert out["probability_correct"].shape == (30,) and np.isfinite(out["raw_logit"]).all()
+    with pytest.raises(ValueError, match="at least 2"):
+        detector.predict(features[0])
+    # signs, scale and row order must not change the result
+    x = torch.randn(40, 3, 24)
+    z = self_pca(x, 6)
+    assert torch.allclose(z, self_pca(x * 5.0, 6), atol=1e-4)
+    perm = torch.randperm(40)
+    assert torch.allclose(z[perm], self_pca(x[perm], 6), atol=1e-3)
+
+
+def test_self_pca_across_llms(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    for name, seed in (("tqa", 1), ("sciq", 2), ("triviaqa", 3)):
+        write_domain(a, name, seed, 0.0, 9, 32)
+    for name, seed in (("tqa", 4), ("popqa", 5), ("triviaqa", 6)):
+        write_domain(b, name, seed, 0.2, 12, 48)
+    main(["train", "--method", "mlp", "--artifact-dir", f"qwen={a}", f"llama={b}", "--output-dir", str(tmp_path / "o"),
+          "--device", "cpu", "--sources", "qwen:tqa", "llama:tqa", "llama:popqa", "--targets", "qwen:triviaqa",
+          "llama:triviaqa", "--epochs", "2", "--num-workers", "0", "--pooling", "logsumexp", "--pool-layers", "5",
+          "--pca-dim", "8", "--pca-fit", "self"])
+    assert json.loads((tmp_path / "o" / "summary.json").read_text())["mlp_input_dimension"] == 40

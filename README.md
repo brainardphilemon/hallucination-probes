@@ -116,6 +116,15 @@ hprobes import-legacy --run-dir <run folder with best_mlp.pt> --artifact-dir <fe
 
 `notebooks/kaggle_inference.ipynb` does this and then scores your examples.
 
+### PCA like pooling (`--pca-fit self`)
+
+By default (`--pca-fit source`) the PCA is fitted once on source-train and its matrices are stored in `model.pt`, so
+the detector only fits the LLM it was trained on. With `--pca-fit self` nothing is stored: every dataset, and at
+inference the batch you pass to `hprobes predict`, is projected with components computed from its own rows (no
+labels), per layer, signs fixed, ordered by variance, scaled by the layer's RMS spread. Combined with
+`--pool-layers 15 --pca-dim 512`, any layer count and hidden size become 15 x 512. Needs a batch of at least 2
+examples at inference (ideally more than the PCA dimension). Whether the MLP transfers across LLMs this way is untested.
+
 ### Several LLMs, one MLP
 
 `hprobes train --method mlp --artifact-dir qwen=<dir> llama=<dir> --sources qwen:tqa llama:tqa ... --targets llama:triviaqa

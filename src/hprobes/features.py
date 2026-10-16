@@ -94,6 +94,39 @@ def pooled_matrix(dataset, args, device, batch_size: int = 256):
     return out
 
 
+def self_pca(x, dim: int, scope: str = "per-layer", seed: int = 42, device=None):
+    """PCA used like pooling: a fixed operation applied to whatever data it is given, nothing stored.
+
+    x: (rows, layers, hidden) CPU float tensor. The principal components are computed from these rows
+    themselves (no labels, no other dataset), per layer (or over all layers for scope 'global'), so any hidden
+    size works and any LLM gives the same (rows, groups, dim) shape. Conventions that make the output comparable
+    between datasets: the sign of each component is set so its largest loading is positive, components are
+    ordered by variance, and each group is divided by its root-mean-square distance from the mean (relative
+    energy of the components is kept). With fewer than dim + 1 rows (or hidden < dim) the missing components
+    are zeros. Needs at least 2 rows.
+    """
+    import torch
+
+    n = x.shape[0]
+    if n < 2:
+        raise ValueError("PCA fitted on the input itself needs at least 2 examples")
+    groups = list(range(x.shape[1])) if scope == "per-layer" else [None]
+    device = device or torch.device("cpu")
+    parts = []
+    with torch.no_grad(), torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
+        torch.manual_seed(seed)
+        for g in groups:
+            block = (x[:, g, :] if g is not None else x.reshape(n, -1)).to(device).float()
+            block = block - block.mean(0)
+            q = max(1, min(dim, block.shape[1], n - 1))
+            _, _, basis = torch.svd_lowrank(block, q=q, niter=4)
+            lead = basis[basis.abs().argmax(0), torch.arange(q, device=basis.device)]
+            basis = basis * torch.where(lead < 0, -1.0, 1.0)
+            z = (block @ basis) / block.square().sum(1).mean().sqrt().clamp(min=1e-8)
+            parts.append(torch.nn.functional.pad(z, (0, dim - q)).cpu())
+    return torch.stack(parts, dim=1)
+
+
 class LayerPCA:
     """PCA fitted on source-train rows only: one PCA over all features ('global') or one per layer."""
 

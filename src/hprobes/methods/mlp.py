@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import numpy as np
 from torch.utils.data import DataLoader
 
 from hprobes.data import StateDataset
-from hprobes.features import LayerPCA, pool_layers, pooled_layer_count, pooled_matrix
+from hprobes.features import LayerPCA, pool_layers, pooled_layer_count, pooled_matrix, self_pca
 from hprobes.losses import make_loss
 from hprobes.training import fit, predict, residual_mlp, seed_everything, tensor_loader
 
@@ -29,7 +32,18 @@ def run(args, data, device):
     splits.update({f"target:{d.name}": StateDataset([d], "all") for d in data.targets})
     labels = {name: [entry[2] for entry in ds.entries] for name, ds in splits.items()}
     pcas = {}
-    if args.pca_dim:
+    if args.pca_dim and args.pca_fit == "self":
+        # PCA acts like pooling: every dataset is projected with components computed from its own rows
+        # (unsupervised, nothing stored), so any LLM and any hidden size end up as pooled_layers x pca_dim.
+        projected = {}
+        for d in [*data.sources, *data.targets]:
+            everything = SimpleNamespace(features=d.features, labels=d.labels, split={"all": np.arange(len(d.labels))})
+            projected[d.name] = self_pca(pooled_matrix(StateDataset([everything], "all"), args, device),
+                                         args.pca_dim, args.pca_scope, args.seed, device).flatten(1)
+
+        def project(domains, split):
+            return torch.cat([projected[d.name][torch.as_tensor(d.split[split])] for d in domains])
+    elif args.pca_dim:
         # One PCA per LLM, fitted on that LLM's pooled source-train features only; the MLP is shared.
         for llm in data.models:
             domains = [d for d in data.sources if d.model == llm]
@@ -42,11 +56,13 @@ def run(args, data, device):
             return torch.cat([pcas[d.model].transform(pooled_matrix(StateDataset([d], split), args, device),
                                                       device).flatten(1) for d in domains])
 
+    if args.pca_dim:
         x = {"train": project(data.sources, "train"), "val": project(data.sources, "val"),
              "test": project(data.sources, "test")}
         x.update({f"target:{d.name}": project([d], "all") for d in data.targets})
         input_dim = x["train"].shape[1]
-        print(f"PCA per LLM {[p.summary() for p in pcas.values()]}; MLP input={input_dim}", flush=True)
+        print(f"PCA fit={args.pca_fit}: {[p.summary() for p in pcas.values()] or 'on each dataset itself'}; "
+              f"MLP input={input_dim}", flush=True)
         loaders = {name: tensor_loader(x[name], labels[name], args.batch_size if name == "train" else 256,
                                        shuffle=name == "train", seed=args.seed) for name in splits}
 
@@ -76,6 +92,8 @@ def run(args, data, device):
     LAST_MODEL.update({
         "pooling": args.pooling, "pool_kernel": args.pool_kernel, "pool_stride": args.pool_stride,
         "pool_layers": args.pool_layers,
+        "pca_fit": args.pca_fit if args.pca_dim else None, "pca_dim": args.pca_dim, "pca_scope": args.pca_scope,
+        "pca_seed": args.seed,
         "models": {name: {"n_layers": layers, "hidden_size": hidden,
                           "pca": pcas[name].state() if pcas else None}
                    for name, (layers, hidden) in data.models.items()},
@@ -84,7 +102,8 @@ def run(args, data, device):
         "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
     })
     summary = {"pooled_layers": pooled, "mlp_input_dimension": input_dim,
-               "pca": {name: p.summary() for name, p in pcas.items()} or None,
+               "pca": {name: p.summary() for name, p in pcas.items()} or ({"fit": "self", "dim": args.pca_dim}
+                                                                         if args.pca_dim else None),
                "parameters": sum(p.numel() for p in model.parameters()),
                "best_source_val_auroc": best_auc, "best_epoch": best_epoch, "history": history}
     return summary, logits["val"], logits["test"], {d.name: logits[f"target:{d.name}"] for d in data.targets}
